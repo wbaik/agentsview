@@ -98,8 +98,9 @@ func runLocalSync(
 	cleanResyncTemp(appCfg.DBPath)
 
 	engine := sync.NewEngine(database, sync.EngineConfig{
-		AgentDirs: appCfg.AgentDirs,
-		Machine:   "local",
+		AgentDirs:     appCfg.AgentDirs,
+		Machine:       "local",
+		CursorStateDB: appCfg.CursorStateDB,
 	})
 
 	didResync := full || database.NeedsResync()

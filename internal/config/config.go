@@ -102,6 +102,13 @@ type Config struct {
 	Automated            AutomatedConfig `json:"automated,omitempty" toml:"automated"`
 	WriteTimeout         time.Duration   `json:"-" toml:"-"`
 
+	// CursorStateDB is the path to Cursor's global
+	// state.vscdb SQLite database used as primary source
+	// for tool calls and rich session metadata.
+	// Set CURSOR_STATE_DB to override. Default:
+	// ~/.config/Cursor/User/globalStorage/state.vscdb
+	CursorStateDB string `json:"-"`
+
 	// AgentDirs maps each AgentType to its configured
 	// directories. Single-dir agents store a one-element
 	// slice; unconfigured agents use nil.
@@ -174,11 +181,15 @@ func Default() (Config, error) {
 	}
 
 	return Config{
-		Host:                           "127.0.0.1",
-		Port:                           8080,
-		DataDir:                        dataDir,
-		DBPath:                         filepath.Join(dataDir, "sessions.db"),
-		WriteTimeout:                   30 * time.Second,
+		Host:         "127.0.0.1",
+		Port:         8080,
+		DataDir:      dataDir,
+		DBPath:       filepath.Join(dataDir, "sessions.db"),
+		WriteTimeout: 30 * time.Second,
+		CursorStateDB: filepath.Join(
+			home,
+			".config/Cursor/User/globalStorage/state.vscdb",
+		),
 		AgentDirs:                      agentDirs,
 		agentDirSource:                 agentDirSource,
 		WatchExcludePatterns:           []string{".git", "node_modules", "__pycache__", ".venv", "venv", "vendor", ".next"},
@@ -568,6 +579,9 @@ func (c *Config) loadEnv() {
 	}
 	if v := os.Getenv("AGENTSVIEW_DISABLE_UPDATE_CHECK"); v != "" {
 		c.DisableUpdateCheck = v == "1" || v == "true"
+	}
+	if v := os.Getenv("CURSOR_STATE_DB"); v != "" {
+		c.CursorStateDB = v
 	}
 }
 
