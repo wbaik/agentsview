@@ -134,7 +134,7 @@
     // Skip overscanned items above the viewport.
     const scrollTop = v.scrollOffset ?? 0;
     for (const vi of items) {
-      if (vi.start < scrollTop) continue;
+      if (vi.end <= scrollTop) continue;
       const item =
         displayItemsAsc[
           ui.sortNewestFirst
