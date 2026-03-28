@@ -564,6 +564,14 @@ func TestStoreGetSessionActivity_PrefixInjectedExcluded(
 		t.Errorf("bucketed messages = %d, want 2",
 			totalBucketed)
 	}
+
+	// The excluded message at 10:01:00 must not extend the
+	// timestamp range. With only 10:00:00-10:00:30 visible,
+	// a single bucket should cover the entire span.
+	if len(resp.Buckets) != 1 {
+		t.Errorf("bucket count = %d, want 1",
+			len(resp.Buckets))
+	}
 }
 
 func TestStoreGetSessionActivity_FractionalTimestamps(

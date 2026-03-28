@@ -139,6 +139,11 @@ describe("SessionActivityStore", () => {
   });
 
   it("clears active indicator when timestamp set to null", async () => {
+    // This tests the store-level contract: setting
+    // firstVisibleTimestamp to null clears the active bucket.
+    // The component-level publishVisibleTimestamp() path that
+    // sets this value is covered by the E2E test "active
+    // indicator moves after reopen without scroll."
     vi.mocked(api.getSessionActivity).mockResolvedValueOnce(
       makeResponse(2),
     );
@@ -149,7 +154,8 @@ describe("SessionActivityStore", () => {
       "2026-03-26T10:05:00Z";
     expect(sessionActivity.activeBucketIndex).toBe(0);
 
-    // Clear it (simulates no visible timestamped items).
+    // Clear it (simulates publishVisibleTimestamp finding
+    // no visible items with timestamps).
     sessionActivity.firstVisibleTimestamp = null;
     expect(sessionActivity.activeBucketIndex).toBeNull();
   });
