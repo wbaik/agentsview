@@ -88,6 +88,8 @@
           sessions.loadChildSessions(id);
           if (ui.activityMinimapOpen) {
             sessionActivity.reload(id);
+          } else {
+            sessionActivity.invalidate();
           }
         });
         pins.loadForSession(id);
