@@ -145,7 +145,7 @@
         );
         if (msg && !thinkingVisible) {
           const segs = enrichSegments(
-            parseContent(msg.content, msg.has_tool_use),
+            parseContent(msg.content, msg.has_tool_use, msg.id),
             msg.tool_calls,
           );
           const hasThinkingSegment = segs.some(

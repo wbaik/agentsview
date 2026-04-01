@@ -148,19 +148,24 @@ interface Match {
   segment: ContentSegment;
 }
 
-const toolOnlyCache = new LRUCache<string, boolean>(12000);
-const segmentCache = new LRUCache<string, ContentSegment[]>(8000);
+const toolOnlyCache = new LRUCache<number, boolean>(500);
+const segmentCache = new LRUCache<string, ContentSegment[]>(500);
+
+/** Clear both content-parser caches. Call on session switch
+ *  to prevent cross-session memory accumulation. */
+export function clearContentCaches(): void {
+  toolOnlyCache.clear();
+  segmentCache.clear();
+}
 
 /** Returns true if the message contains only tool calls (no text) */
 export function isToolOnly(msg: Message): boolean {
-  const key =
-    `${msg.role}|${msg.has_tool_use ? 1 : 0}|${msg.content}`;
-  const cached = toolOnlyCache.get(key);
+  const cached = toolOnlyCache.get(msg.id);
   if (cached !== undefined) return cached;
 
   if (msg.role !== "assistant") return false;
   if (!msg.has_tool_use) {
-    toolOnlyCache.set(key, false);
+    toolOnlyCache.set(msg.id, false);
     return false;
   }
   const stripped = msg.content
@@ -169,7 +174,7 @@ export function isToolOnly(msg: Message): boolean {
     .replace(TOOL_RE, "")
     .trim();
   const result = stripped.length === 0;
-  toolOnlyCache.set(key, result);
+  toolOnlyCache.set(msg.id, result);
   return result;
 }
 
@@ -347,14 +352,26 @@ function mergeThinking(
   return result;
 }
 
-/** Parse message content into typed segments */
-export function parseContent(text: string, hasToolUse = true): ContentSegment[] {
+/** Parse message content into typed segments.
+ *  Pass messageId to enable LRU caching keyed by ID
+ *  instead of by full text (avoids storing huge strings
+ *  as Map keys). */
+export function parseContent(
+  text: string,
+  hasToolUse = true,
+  messageId?: number,
+): ContentSegment[] {
   if (!text) return [];
-  const cacheKey = hasToolUse
-    ? `tools\0${text}`
-    : `notools\0${text}`;
-  const cached = segmentCache.get(cacheKey);
-  if (cached) return cached;
+
+  const cacheKey =
+    messageId !== undefined
+      ? `${hasToolUse ? "t" : "n"}:${messageId}`
+      : undefined;
+
+  if (cacheKey) {
+    const cached = segmentCache.get(cacheKey);
+    if (cached) return cached;
+  }
 
   const matches = extractMatches(text, hasToolUse);
 
@@ -362,7 +379,7 @@ export function parseContent(text: string, hasToolUse = true): ContentSegment[] 
     const onlyText: ContentSegment[] = [
       { type: "text", content: text.trimEnd() },
     ];
-    segmentCache.set(cacheKey, onlyText);
+    if (cacheKey) segmentCache.set(cacheKey, onlyText);
     return onlyText;
   }
 
@@ -371,7 +388,7 @@ export function parseContent(text: string, hasToolUse = true): ContentSegment[] 
     buildSegments(text, deduped),
   );
 
-  segmentCache.set(cacheKey, segments);
+  if (cacheKey) segmentCache.set(cacheKey, segments);
   return segments;
 }
 
@@ -487,7 +504,7 @@ export function hasVisibleSegments(
   const role: "user" | "assistant" =
     msg.role === "user" ? "user" : "assistant";
   const segs = enrichSegments(
-    parseContent(msg.content, msg.has_tool_use),
+    parseContent(msg.content, msg.has_tool_use, msg.id),
     msg.tool_calls,
   );
   // Empty messages (e.g. initial assistant streaming state) should
