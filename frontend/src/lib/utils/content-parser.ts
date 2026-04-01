@@ -160,7 +160,8 @@ export function clearContentCaches(): void {
 
 /** Returns true if the message contains only tool calls (no text) */
 export function isToolOnly(msg: Message): boolean {
-  const key = `${msg.id}:${msg.content_length}`;
+  const len = msg.content_length ?? msg.content.length;
+  const key = `${msg.id}:${len}:${msg.has_tool_use ? 1 : 0}`;
   const cached = toolOnlyCache.get(key);
   if (cached !== undefined) return cached;
 
