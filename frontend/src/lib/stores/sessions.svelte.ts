@@ -145,6 +145,7 @@ class SessionsStore {
     }
 
     const prevOneShot = this.filters.includeOneShot;
+    const prevAutomated = this.filters.includeAutomated;
     // Default is true (show single-turn); only false when
     // explicitly set to "false" in URL params.
     const oneShotParam = params["include_one_shot"];
@@ -170,7 +171,8 @@ class SessionsStore {
       includeOneShot: nextOneShot,
       includeAutomated: nextAutomated,
     };
-    if (prevOneShot !== nextOneShot) {
+    if (prevOneShot !== nextOneShot ||
+        prevAutomated !== nextAutomated) {
       this.invalidateFilterCaches();
     }
     this.setActiveSession(null);
