@@ -832,3 +832,34 @@ func TestIsAutomatedSetOnUpsert(t *testing.T) {
 		t.Error("single-turn roborev substring should be automated")
 	}
 }
+
+func TestIncrementalUpdateClearsAutomated(t *testing.T) {
+	d := testDB(t)
+
+	// Start as single-turn automated session.
+	fm := "You are a code reviewer. Review the code."
+	insertSession(t, d, "s1", "proj", func(s *Session) {
+		s.FirstMessage = &fm
+		s.MessageCount = 3
+		s.UserMessageCount = 1
+	})
+
+	ctx := context.Background()
+	s, err := d.GetSession(ctx, "s1")
+	requireNoError(t, err, "get before")
+	if !s.IsAutomated {
+		t.Fatal("should start as automated")
+	}
+
+	// Simulate a second user turn via incremental update.
+	err = d.UpdateSessionIncremental(
+		"s1", nil, 6, 2, 100, 12345, 0, 0, false, false,
+	)
+	requireNoError(t, err, "incremental update")
+
+	s, err = d.GetSession(ctx, "s1")
+	requireNoError(t, err, "get after")
+	if s.IsAutomated {
+		t.Error("should no longer be automated after second user turn")
+	}
+}

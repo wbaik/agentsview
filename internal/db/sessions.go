@@ -778,11 +778,26 @@ func (db *DB) UpdateSessionIncremental(
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	// Recompute is_automated: read stored first_message and
+	// apply the detector with the new user_message_count.
+	isAutomated := false
+	if userMsgCount <= 1 {
+		var fm sql.NullString
+		_ = db.getWriter().QueryRow(
+			"SELECT first_message FROM sessions WHERE id = ?",
+			id,
+		).Scan(&fm)
+		if fm.Valid {
+			isAutomated = IsAutomatedSession(fm.String)
+		}
+	}
+
 	_, err := db.getWriter().Exec(`
 		UPDATE sessions SET
 			ended_at = COALESCE(?, ended_at),
 			message_count = ?,
 			user_message_count = ?,
+			is_automated = ?,
 			file_size = ?,
 			file_mtime = ?,
 			total_output_tokens = ?,
@@ -790,7 +805,7 @@ func (db *DB) UpdateSessionIncremental(
 			has_total_output_tokens = ?,
 			has_peak_context_tokens = ?
 		WHERE id = ?`,
-		endedAt, msgCount, userMsgCount,
+		endedAt, msgCount, userMsgCount, isAutomated,
 		fileSize, fileMtime,
 		totalOutputTokens, peakContextTokens,
 		hasTotalOutputTokens, hasPeakContextTokens, id,
