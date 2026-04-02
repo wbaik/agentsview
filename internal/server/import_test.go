@@ -13,42 +13,6 @@ import (
 	"github.com/wesm/agentsview/internal/importer"
 )
 
-// parseSSEDone extracts the "done" event data from an SSE
-// response body and decodes it into the target.
-func parseSSEDone(t *testing.T, body string, v any) {
-	t.Helper()
-	for line := range strings.SplitSeq(body, "\n") {
-		if strings.HasPrefix(line, "data: ") {
-			data := line[len("data: "):]
-			// The last data line before EOF with event:done
-			// is the final stats. Try to decode each data
-			// line; keep the last successful decode.
-			if err := json.Unmarshal(
-				[]byte(data), v,
-			); err == nil {
-				continue
-			}
-		}
-	}
-	// Re-parse: find event:done specifically.
-	lines := strings.Split(body, "\n")
-	for i, line := range lines {
-		if line == "event: done" && i+1 < len(lines) {
-			data := strings.TrimPrefix(lines[i+1], "data: ")
-			if err := json.Unmarshal(
-				[]byte(data), v,
-			); err != nil {
-				t.Fatalf(
-					"decoding SSE done event: %v\nbody: %s",
-					err, body,
-				)
-			}
-			return
-		}
-	}
-	t.Fatalf("no 'done' event in SSE response:\n%s", body)
-}
-
 func TestHandleImportClaudeAI(t *testing.T) {
 	srv := testServer(t, 5*time.Second)
 
@@ -102,10 +66,7 @@ func TestHandleImportClaudeAI(t *testing.T) {
 	}
 
 	var stats importer.ImportStats
-	ct := rec.Header().Get("Content-Type")
-	if strings.Contains(ct, "text/event-stream") {
-		parseSSEDone(t, rec.Body.String(), &stats)
-	} else if err := json.NewDecoder(rec.Body).Decode(&stats); err != nil {
+	if err := json.NewDecoder(rec.Body).Decode(&stats); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if stats.Imported != 1 {
@@ -145,6 +106,79 @@ func TestHandleImportChatGPT_RequiresZip(t *testing.T) {
 			"status = %d, want 400: %s",
 			rec.Code, rec.Body.String(),
 		)
+	}
+}
+
+func TestHandleImportClaudeAI_SSE(t *testing.T) {
+	srv := testServer(t, 5*time.Second)
+
+	conversations := `[{
+      "uuid": "sse-test-001",
+      "name": "SSE Test",
+      "created_at": "2026-03-01T10:00:00.000000Z",
+      "updated_at": "2026-03-01T10:05:00.000000Z",
+      "chat_messages": [{
+        "uuid": "m1", "text": "hello", "sender": "human",
+        "content": [{"type":"text","text":"hello"}],
+        "created_at": "2026-03-01T10:00:00.000000Z"
+      }]
+    }]`
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile(
+		"file", "conversations.json",
+	)
+	if err != nil {
+		t.Fatalf("creating form file: %v", err)
+	}
+	_, _ = part.Write([]byte(conversations))
+	writer.Close()
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/import/claude-ai",
+		&body,
+	)
+	req.Header.Set(
+		"Content-Type", writer.FormDataContentType(),
+	)
+	req.Header.Set("Accept", "text/event-stream")
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf(
+			"status = %d, want 200: %s",
+			rec.Code, rec.Body.String(),
+		)
+	}
+
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf(
+			"Content-Type = %q, want text/event-stream", ct,
+		)
+	}
+
+	// Parse the done event from the SSE body.
+	var stats importer.ImportStats
+	lines := strings.Split(rec.Body.String(), "\n")
+	for i, line := range lines {
+		if line == "event: done" && i+1 < len(lines) {
+			data := strings.TrimPrefix(
+				lines[i+1], "data: ",
+			)
+			if err := json.Unmarshal(
+				[]byte(data), &stats,
+			); err != nil {
+				t.Fatalf("decoding done event: %v", err)
+			}
+		}
+	}
+	if stats.Imported != 1 {
+		t.Errorf("imported = %d, want 1", stats.Imported)
 	}
 }
 

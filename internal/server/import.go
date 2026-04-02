@@ -12,6 +12,14 @@ import (
 	"github.com/wesm/agentsview/internal/importer"
 )
 
+// wantsSSE checks if the client opted into streaming via
+// the Accept header.
+func wantsSSE(r *http.Request) bool {
+	return strings.Contains(
+		r.Header.Get("Accept"), "text/event-stream",
+	)
+}
+
 // sseWriter wraps an http.ResponseWriter for streaming
 // Server-Sent Events. Each call to event() writes one SSE
 // frame and flushes immediately.
@@ -111,9 +119,7 @@ func (s *Server) handleImportClaudeAI(
 		reader = jsonFile
 	}
 
-	sse, ok := newSSEWriter(w)
-	if !ok {
-		// Fallback: run without streaming.
+	if !wantsSSE(r) {
 		stats, err := importer.ImportClaudeAI(
 			r.Context(), s.db, reader, nil,
 		)
@@ -123,6 +129,13 @@ func (s *Server) handleImportClaudeAI(
 			return
 		}
 		writeJSON(w, http.StatusOK, stats)
+		return
+	}
+
+	sse, ok := newSSEWriter(w)
+	if !ok {
+		writeError(w, http.StatusInternalServerError,
+			"streaming not supported")
 		return
 	}
 
@@ -208,8 +221,7 @@ func (s *Server) handleImportChatGPT(
 
 	assetsDir := filepath.Join(s.cfg.DataDir, "assets")
 
-	sse, ok := newSSEWriter(w)
-	if !ok {
+	if !wantsSSE(r) {
 		stats, err := importer.ImportChatGPT(
 			r.Context(), s.db, dir, assetsDir, nil,
 		)
@@ -219,6 +231,13 @@ func (s *Server) handleImportChatGPT(
 			return
 		}
 		writeJSON(w, http.StatusOK, stats)
+		return
+	}
+
+	sse, ok := newSSEWriter(w)
+	if !ok {
+		writeError(w, http.StatusInternalServerError,
+			"streaming not supported")
 		return
 	}
 

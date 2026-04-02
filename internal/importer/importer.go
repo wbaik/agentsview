@@ -127,6 +127,7 @@ func ImportClaudeAI(
 				"import: skipping %s: %v",
 				result.Session.ID, err,
 			)
+			cb.progress(stats)
 			return nil
 		}
 
@@ -294,6 +295,7 @@ func ImportChatGPT(
 				log.Printf(
 					"import: skipping %s: %v", s.ID, err,
 				)
+				cb.progress(stats)
 				return nil
 			}
 			if existing != nil {
@@ -327,6 +329,7 @@ func ImportChatGPT(
 				log.Printf(
 					"import: skipping %s: %v", s.ID, err,
 				)
+				cb.progress(stats)
 				return nil
 			}
 
@@ -359,6 +362,7 @@ func ImportChatGPT(
 					"import: skipping messages for %s: %v",
 					s.ID, err,
 				)
+				cb.progress(stats)
 				return nil
 			}
 

@@ -349,7 +349,8 @@
                 {@const n =
                   progressStats.imported +
                   progressStats.updated +
-                  progressStats.skipped}
+                  progressStats.skipped +
+                  progressStats.errors}
                 <span class="importing-label">
                   {n} conversation{n !== 1 ? "s" : ""}
                   processed...

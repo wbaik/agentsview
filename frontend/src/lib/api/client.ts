@@ -994,9 +994,12 @@ export async function importClaudeAI(
 ): Promise<ImportStats> {
   const form = new FormData();
   form.append("file", file);
+  const init = authHeaders({ method: "POST", body: form });
+  const headers = new Headers(init.headers);
+  headers.set("Accept", "text/event-stream");
   const res = await fetch(
     `${getBase()}/import/claude-ai`,
-    authHeaders({ method: "POST", body: form }),
+    { ...init, headers },
   );
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -1017,9 +1020,12 @@ export async function importChatGPT(
 ): Promise<ImportStats> {
   const form = new FormData();
   form.append("file", file);
+  const init = authHeaders({ method: "POST", body: form });
+  const headers = new Headers(init.headers);
+  headers.set("Accept", "text/event-stream");
   const res = await fetch(
     `${getBase()}/import/chatgpt`,
-    authHeaders({ method: "POST", body: form }),
+    { ...init, headers },
   );
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
