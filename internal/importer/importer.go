@@ -20,6 +20,27 @@ type ImportStats struct {
 	Errors   int `json:"errors"`
 }
 
+// ImportCallbacks provides optional progress reporting.
+type ImportCallbacks struct {
+	// OnProgress fires after each conversation with current
+	// cumulative stats.
+	OnProgress func(ImportStats)
+	// OnIndexing fires before the FTS index rebuild starts.
+	OnIndexing func()
+}
+
+func (c *ImportCallbacks) progress(s ImportStats) {
+	if c != nil && c.OnProgress != nil {
+		c.OnProgress(s)
+	}
+}
+
+func (c *ImportCallbacks) indexing() {
+	if c != nil && c.OnIndexing != nil {
+		c.OnIndexing()
+	}
+}
+
 // ftsSuspender is optionally implemented by stores that
 // support dropping and rebuilding FTS indexes.
 type ftsSuspender interface {
@@ -33,16 +54,19 @@ type ftsSuspender interface {
 // avoids the expensive FTS rebuild when re-importing an
 // unchanged archive.
 type lazyFTS struct {
-	sus     ftsSuspender
-	dropped bool
+	sus        ftsSuspender
+	dropped    bool
+	onIndexing func()
 }
 
-func newLazyFTS(store db.Store) *lazyFTS {
+func newLazyFTS(
+	store db.Store, onIndexing func(),
+) *lazyFTS {
 	s, ok := store.(ftsSuspender)
 	if !ok || !store.HasFTS() {
 		return nil
 	}
-	return &lazyFTS{sus: s}
+	return &lazyFTS{sus: s, onIndexing: onIndexing}
 }
 
 func (f *lazyFTS) suspend() {
@@ -60,6 +84,9 @@ func (f *lazyFTS) restore() {
 	if f == nil || !f.dropped {
 		return
 	}
+	if f.onIndexing != nil {
+		f.onIndexing()
+	}
 	if err := f.sus.RebuildFTS(); err != nil {
 		log.Printf("import: rebuild FTS: %v", err)
 	}
@@ -74,9 +101,9 @@ func ImportClaudeAI(
 	ctx context.Context,
 	store db.Store,
 	r io.Reader,
-	onProgress func(imported int),
+	cb *ImportCallbacks,
 ) (ImportStats, error) {
-	fts := newLazyFTS(store)
+	fts := newLazyFTS(store, cb.indexing)
 	defer fts.restore()
 
 	var stats ImportStats
@@ -109,11 +136,7 @@ func ImportClaudeAI(
 			stats.Skipped++
 		}
 
-		if onProgress != nil {
-			total := stats.Imported + stats.Updated + stats.Skipped
-			onProgress(total)
-		}
-
+		cb.progress(stats)
 		return nil
 	})
 
@@ -233,9 +256,9 @@ func ImportChatGPT(
 	store db.Store,
 	dir string,
 	assetsDir string,
-	onProgress func(processed int),
+	cb *ImportCallbacks,
 ) (ImportStats, error) {
-	fts := newLazyFTS(store)
+	fts := newLazyFTS(store, cb.indexing)
 	defer fts.restore()
 
 	var stats ImportStats
@@ -264,9 +287,7 @@ func ImportChatGPT(
 			}
 			if existing != nil {
 				stats.Skipped++
-				if onProgress != nil {
-					onProgress(stats.Imported + stats.Skipped)
-				}
+				cb.progress(stats)
 				return nil
 			}
 
@@ -288,9 +309,7 @@ func ImportChatGPT(
 			if err := store.UpsertSession(sess); err != nil {
 				if errors.Is(err, db.ErrSessionExcluded) {
 					stats.Skipped++
-					if onProgress != nil {
-						onProgress(stats.Imported + stats.Skipped)
-					}
+					cb.progress(stats)
 					return nil
 				}
 				stats.Errors++
@@ -333,9 +352,7 @@ func ImportChatGPT(
 			}
 
 			stats.Imported++
-			if onProgress != nil {
-				onProgress(stats.Imported + stats.Skipped)
-			}
+			cb.progress(stats)
 			return nil
 		},
 	)

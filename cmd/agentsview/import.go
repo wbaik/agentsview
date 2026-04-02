@@ -107,11 +107,20 @@ func runClaudeAIImport(
 	defer f.Close()
 
 	return importer.ImportClaudeAI(
-		ctx, database, f, func(n int) {
-			fmt.Fprintf(
-				os.Stderr,
-				"\rImported %d conversations...", n,
-			)
+		ctx, database, f, &importer.ImportCallbacks{
+			OnProgress: func(s importer.ImportStats) {
+				n := s.Imported + s.Updated + s.Skipped
+				fmt.Fprintf(
+					os.Stderr,
+					"\r%d conversations processed...", n,
+				)
+			},
+			OnIndexing: func() {
+				fmt.Fprintf(
+					os.Stderr,
+					"\rRebuilding search index...   ",
+				)
+			},
 		},
 	)
 }
@@ -122,12 +131,20 @@ func runChatGPTImport(
 ) (importer.ImportStats, error) {
 	return importer.ImportChatGPT(
 		ctx, database, dir, assetsDir,
-		func(processed int) {
-			fmt.Fprintf(
-				os.Stderr,
-				"\rProcessed %d conversations...",
-				processed,
-			)
+		&importer.ImportCallbacks{
+			OnProgress: func(s importer.ImportStats) {
+				n := s.Imported + s.Skipped
+				fmt.Fprintf(
+					os.Stderr,
+					"\r%d conversations processed...", n,
+				)
+			},
+			OnIndexing: func() {
+				fmt.Fprintf(
+					os.Stderr,
+					"\rRebuilding search index...   ",
+				)
+			},
 		},
 	)
 }

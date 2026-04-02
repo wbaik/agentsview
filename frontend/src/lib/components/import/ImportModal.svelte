@@ -3,6 +3,7 @@
   import {
     importClaudeAI,
     importChatGPT,
+    type ImportStats,
   } from "../../api/client.js";
 
   interface Props {
@@ -20,7 +21,7 @@
   type ImportResult = {
     imported: number;
     updated: number;
-    skipped?: number;
+    skipped: number;
     errors: number;
   };
 
@@ -33,6 +34,10 @@
   let dragCount = $state(0);
   let result = $state<ImportResult | null>(null);
   let error = $state<string | null>(null);
+  let phase = $state<"importing" | "indexing">(
+    "importing",
+  );
+  let progressStats = $state<ImportStats | null>(null);
 
   const fileSize = $derived(
     selectedFile
@@ -50,7 +55,7 @@
     result
       ? result.imported +
           result.updated +
-          (result.skipped ?? 0)
+          result.skipped
       : 0,
   );
 
@@ -136,13 +141,23 @@
     importing = true;
     error = null;
     result = null;
+    phase = "importing";
+    progressStats = null;
+
+    const cb = {
+      onProgress: (stats: ImportStats) => {
+        progressStats = stats;
+      },
+      onIndexing: () => {
+        phase = "indexing";
+      },
+    };
 
     try {
       if (provider === "chatgpt") {
-        result = await importChatGPT(selectedFile);
+        result = await importChatGPT(selectedFile, cb);
       } else {
-        const r = await importClaudeAI(selectedFile);
-        result = { ...r, skipped: 0 };
+        result = await importClaudeAI(selectedFile, cb);
       }
       onimported();
     } catch (e) {
@@ -255,12 +270,12 @@
                 </span>
                 <span class="stat-lbl">updated</span>
               </div>
-              {#if (result.skipped ?? 0) > 0}
+              {#if result.skipped > 0}
                 <div class="stat">
                   <span class="stat-num skipped">
                     {result.skipped}
                   </span>
-                  <span class="stat-lbl">skipped</span>
+                  <span class="stat-lbl">unchanged</span>
                 </div>
               {/if}
               {#if result.errors > 0}
@@ -326,9 +341,24 @@
           {#if importing}
             <div class="zone zone-importing">
               <div class="modal-spinner"></div>
-              <span class="importing-label">
-                Importing conversations...
-              </span>
+              {#if phase === "indexing"}
+                <span class="importing-label">
+                  Rebuilding search index...
+                </span>
+              {:else if progressStats}
+                {@const n =
+                  progressStats.imported +
+                  progressStats.updated +
+                  progressStats.skipped}
+                <span class="importing-label">
+                  {n} conversation{n !== 1 ? "s" : ""}
+                  processed...
+                </span>
+              {:else}
+                <span class="importing-label">
+                  Importing conversations...
+                </span>
+              {/if}
             </div>
           {:else if selectedFile}
             <div class="zone zone-file">
