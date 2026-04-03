@@ -78,6 +78,7 @@ type Config struct {
 	AuthToken            string         `json:"auth_token,omitempty" toml:"auth_token"`
 	RemoteAccess         bool           `json:"remote_access" toml:"remote_access"`
 	NoBrowser            bool           `json:"no_browser" toml:"no_browser"`
+	DisableUpdateCheck   bool           `json:"disable_update_check" toml:"disable_update_check"`
 	NoSync               bool           `json:"-" toml:"-"`
 	PG                   PGConfig       `json:"pg,omitempty" toml:"pg"`
 	WriteTimeout         time.Duration  `json:"-" toml:"-"`
@@ -299,6 +300,7 @@ func (c *Config) loadFile() error {
 		Terminal                       TerminalConfig `toml:"terminal"`
 		AuthToken                      string         `toml:"auth_token"`
 		RemoteAccess                   bool           `toml:"remote_access"`
+		DisableUpdateCheck             bool           `toml:"disable_update_check"`
 		PG                             PGConfig       `toml:"pg"`
 	}
 	if _, err := toml.DecodeFile(path, &file); err != nil {
@@ -335,6 +337,9 @@ func (c *Config) loadFile() error {
 		c.AuthToken = file.AuthToken
 	}
 	c.RemoteAccess = file.RemoteAccess
+	if file.DisableUpdateCheck {
+		c.DisableUpdateCheck = true
+	}
 	// Merge pg field-by-field so env vars override only
 	// the fields they set, preserving config-file settings.
 	if file.PG.URL != "" && c.PG.URL == "" {
@@ -469,6 +474,9 @@ func (c *Config) loadEnv() {
 	if v := os.Getenv("AGENTSVIEW_PG_MACHINE"); v != "" {
 		c.PG.MachineName = v
 	}
+	if v := os.Getenv("AGENTSVIEW_DISABLE_UPDATE_CHECK"); v == "1" || v == "true" {
+		c.DisableUpdateCheck = true
+	}
 }
 
 type stringListFlag []string
@@ -539,6 +547,10 @@ func RegisterServeFlags(fs *flag.FlagSet) {
 		"no-sync", false,
 		"Skip initial sync and disable background sync/file watching",
 	)
+	fs.Bool(
+		"no-update-check", false,
+		"Disable the update check API endpoint",
+	)
 }
 
 // applyFlags copies explicitly-set flags from fs into cfg.
@@ -576,6 +588,8 @@ func applyFlags(cfg *Config, fs *flag.FlagSet) {
 			cfg.NoBrowser = f.Value.String() == "true"
 		case "no-sync":
 			cfg.NoSync = f.Value.String() == "true"
+		case "no-update-check":
+			cfg.DisableUpdateCheck = f.Value.String() == "true"
 		}
 	})
 }

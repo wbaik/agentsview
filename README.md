@@ -69,10 +69,14 @@ or diagnostics are collected or sent anywhere.
 - The optional PostgreSQL sync is explicit and user-initiated (`pg push`),
   connecting only to a server you configure
 
-The desktop app checks GitHub for new releases on startup. This contacts
-`github.com` but sends no analytics or session data. To disable the update
-check, set `AGENTSVIEW_DESKTOP_AUTOUPDATE=0` in your environment. The CLI binary
-makes no network requests at all.
+The only outbound network request is an update check that fetches release
+metadata from GitHub on startup. This sends no analytics or session data. The
+desktop app and the web UI both perform this check. To disable it:
+
+- **Desktop app**: set `AGENTSVIEW_DESKTOP_AUTOUPDATE=0`
+- **CLI/web UI**: set `AGENTSVIEW_DISABLE_UPDATE_CHECK=1`, pass
+  `-no-update-check`, or set `disable_update_check = true` in
+  `~/.agentsview/config.toml`
 
 ## Usage
 
