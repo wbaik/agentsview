@@ -42,6 +42,20 @@ type PushResult struct {
 // bypassed and every candidate session's messages are
 // re-pushed unconditionally.
 //
+// When project filters are set (via SyncOptions), only
+// matching sessions are pushed. Filtered pushes do not
+// advance the global watermark (last_push_at) because the
+// watermark covers all projects — advancing it would cause
+// unfiltered sessions to be skipped. Instead, filtered
+// pushes rely on fingerprints for incrementality: each run
+// re-queries all sessions since the last unfiltered push
+// and skips those whose fingerprint hasn't changed. This
+// means the query window grows between unfiltered pushes.
+// If filtered push is the normal operating mode (e.g. set
+// in config and running on a cron), run an occasional
+// unfiltered push to advance the watermark and bound the
+// query window.
+//
 // Known limitation: sessions that are permanently deleted
 // from SQLite (via prune) are not propagated as deletions
 // to PG because the local rows no longer exist at push time.
