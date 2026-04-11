@@ -1,3 +1,5 @@
+import { getAuthToken } from "../api/client.js";
+
 const DEBOUNCE_MS = 5_000;
 const TIMEOUT_MS = 3_000;
 
@@ -22,9 +24,15 @@ export function setupVisibilityHealthCheck(
     if (now - lastCheck < DEBOUNCE_MS) return;
     lastCheck = now;
 
-    fetch(`${baseUrl}/version`, {
+    const init: RequestInit = {
       signal: AbortSignal.timeout(TIMEOUT_MS),
-    })
+    };
+    const token = getAuthToken();
+    if (token) {
+      init.headers = { Authorization: `Bearer ${token}` };
+    }
+
+    fetch(`${baseUrl}/version`, init)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
       })

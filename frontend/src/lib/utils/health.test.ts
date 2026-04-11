@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { setupVisibilityHealthCheck } from "./health.js";
+import { setAuthToken } from "../api/client.js";
 
 describe("setupVisibilityHealthCheck", () => {
   let originalFetch: typeof globalThis.fetch;
@@ -12,10 +13,12 @@ describe("setupVisibilityHealthCheck", () => {
       value: { reload: reloadSpy },
       writable: true,
     });
+    setAuthToken("");
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    setAuthToken("");
     vi.restoreAllMocks();
   });
 
@@ -108,6 +111,37 @@ describe("setupVisibilityHealthCheck", () => {
       "/custom/base/version",
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+    cleanup();
+  });
+
+  it("includes auth header when token is set", async () => {
+    setAuthToken("test-secret");
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(new Response("{}", { status: 200 }));
+    const cleanup = setupVisibilityHealthCheck("/api/v1");
+    fireVisible();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "/api/v1/version",
+      expect.objectContaining({
+        headers: { Authorization: "Bearer test-secret" },
+      }),
+    );
+    cleanup();
+  });
+
+  it("omits auth header when no token", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(new Response("{}", { status: 200 }));
+    const cleanup = setupVisibilityHealthCheck("/api/v1");
+    fireVisible();
+    await new Promise((r) => setTimeout(r, 50));
+    const call = (globalThis.fetch as ReturnType<typeof vi.fn>)
+      .mock.calls[0]!;
+    const init = call[1] as RequestInit;
+    expect(init.headers).toBeUndefined();
     cleanup();
   });
 });

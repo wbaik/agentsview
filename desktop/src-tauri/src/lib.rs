@@ -557,10 +557,17 @@ fn desktop_redirect_url(port: u16) -> String {
 /// JS pings the backend and reloads on failure — covers
 /// alive-but-disconnected WebViews.
 fn recover_webview(window: &WebviewWindow, port: u16) {
-    let health_js = "fetch('/api/v1/version',\
-        {signal:AbortSignal.timeout(3000)})\
+    // Read the auth token from localStorage (same key the frontend
+    // API client uses) so the health probe succeeds in authenticated
+    // remote-access mode.
+    let health_js = "(function(){\
+        var t=localStorage.getItem('agentsview-auth-token')||'';\
+        var h={signal:AbortSignal.timeout(3000)};\
+        if(t)h.headers={'Authorization':'Bearer '+t};\
+        fetch('/api/v1/version',h)\
         .then(function(r){if(!r.ok)throw r})\
-        .catch(function(){location.reload()})";
+        .catch(function(){location.reload()})\
+        })()";
     match window.eval(health_js) {
         Ok(()) => {}
         Err(err) => {
