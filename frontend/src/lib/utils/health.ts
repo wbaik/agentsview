@@ -41,9 +41,9 @@ export function setupVisibilityHealthCheck(
     if (now - lastCheck < DEBOUNCE_MS) return;
     lastCheck = now;
 
-    const init: RequestInit = {
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    const init: RequestInit = { signal: controller.signal };
     const token = getAuthToken();
     if (token) {
       init.headers = { Authorization: `Bearer ${token}` };
@@ -51,9 +51,11 @@ export function setupVisibilityHealthCheck(
 
     fetch(`${getBaseUrl()}/version`, init)
       .then((res) => {
+        clearTimeout(timer);
         if (res.status >= 500) throw new Error(`HTTP ${res.status}`);
       })
       .catch(() => {
+        clearTimeout(timer);
         window.location.reload();
       });
   }
