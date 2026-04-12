@@ -746,11 +746,13 @@ func extractMessages(entries []dagEntry) (
 }
 
 // extractClaudeTokenFields populates Model, TokenUsage,
-// ContextTokens, and OutputTokens on a ParsedMessage from
-// a Claude JSONL line. Used by both full and incremental
-// parsing paths.
+// ContextTokens, OutputTokens, ClaudeMessageID, and
+// ClaudeRequestID on a ParsedMessage from a Claude JSONL line.
+// Used by both full and incremental parsing paths.
 func extractClaudeTokenFields(msg *ParsedMessage, line string) {
 	msg.Model = gjson.Get(line, "message.model").String()
+	msg.ClaudeMessageID = gjson.Get(line, "message.id").String()
+	msg.ClaudeRequestID = gjson.Get(line, "requestId").String()
 
 	usageResult := gjson.Get(line, "message.usage")
 	if usageResult.Exists() {
