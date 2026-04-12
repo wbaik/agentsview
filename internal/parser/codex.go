@@ -191,12 +191,15 @@ func (b *codexSessionBuilder) handleEventMsg(
 	}
 	b.lastTokenUsageRaw = raw
 
-	// Find last message to attach usage to.
+	// Find last assistant message without usage in the current
+	// turn. Stop at user message boundary so we don't cross
+	// turns.
 	for i := len(b.messages) - 1; i >= 0; i-- {
-		if b.messages[i].TokenUsage != nil {
+		if b.messages[i].Role == RoleUser {
 			break
 		}
-		if b.messages[i].Role == RoleAssistant {
+		if b.messages[i].Role == RoleAssistant &&
+			b.messages[i].TokenUsage == nil {
 			b.applyCodexTokenUsage(&b.messages[i], raw)
 			return
 		}

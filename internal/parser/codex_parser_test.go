@@ -927,6 +927,30 @@ func TestParseCodexSession_TokenUsage(t *testing.T) {
 		assert.Equal(t, 32000, sess.PeakContextTokens)
 	})
 
+	t.Run("multiple API calls in one turn", func(t *testing.T) {
+		content := testjsonl.JoinJSONL(
+			testjsonl.CodexSessionMetaJSON("tu-5", "/tmp", "user", tsEarly),
+			testjsonl.CodexTurnContextJSON("gpt-5.4", tsEarlyS1),
+			testjsonl.CodexMsgJSON("user", "do stuff", tsEarlyS1),
+			// First API call: assistant + function call.
+			testjsonl.CodexMsgJSON("assistant", "let me check", tsEarlyS5),
+			testjsonl.CodexFunctionCallJSON("exec_command", "ls", tsEarlyS5),
+			testjsonl.CodexTokenCountJSON(tsEarlyS5, 10000, 300, 6000),
+			// Second API call after tool output.
+			testjsonl.CodexMsgJSON("assistant", "here is the result", tsLate),
+			testjsonl.CodexTokenCountJSON(tsLate, 15000, 400, 10000),
+		)
+		_, msgs := runCodexParserTest(t, "test.jsonl", content, false)
+
+		// First token_count attaches to function_call (last
+		// assistant msg before it).
+		assert.Equal(t, 300, msgs[2].OutputTokens)
+		assert.Empty(t, msgs[1].TokenUsage)
+
+		// Second token_count attaches to second assistant msg.
+		assert.Equal(t, 400, msgs[3].OutputTokens)
+	})
+
 	t.Run("no token_count leaves usage empty", func(t *testing.T) {
 		content := testjsonl.JoinJSONL(
 			testjsonl.CodexSessionMetaJSON("tu-4", "/tmp", "user", tsEarly),
