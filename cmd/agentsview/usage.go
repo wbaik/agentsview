@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -13,7 +15,15 @@ import (
 	"github.com/wesm/agentsview/internal/config"
 	"github.com/wesm/agentsview/internal/db"
 	"github.com/wesm/agentsview/internal/pricing"
+	"github.com/wesm/agentsview/internal/server"
+	"github.com/wesm/agentsview/internal/sync"
 )
+
+// quickSyncMargin pads the mtime cutoff backward from the
+// last recorded sync start time to catch files modified
+// during the prior sync. Smaller values are faster but risk
+// missing recent writes; 10s is a safe default.
+const quickSyncMargin = 10 * time.Second
 
 func runUsage(args []string) {
 	if len(args) == 0 {
@@ -50,6 +60,8 @@ func runUsageDaily(args []string) {
 		"Show per-model breakdown rows")
 	offline := fs.Bool("offline", false,
 		"Use fallback pricing only")
+	noSync := fs.Bool("no-sync", false,
+		"Skip on-demand sync before querying")
 	timezone := fs.String("timezone", "",
 		"IANA timezone for date bucketing")
 
@@ -57,9 +69,10 @@ func runUsageDaily(args []string) {
 		os.Exit(1)
 	}
 
-	database := openUsageDB()
+	database, appCfg := openUsageDB()
 	defer database.Close()
 
+	ensureFreshData(appCfg, database, *noSync)
 	ensurePricing(database, *offline)
 
 	tz := *timezone
@@ -101,14 +114,17 @@ func runUsageStatusline(args []string) {
 		"Filter by agent (claude, codex)")
 	offline := fs.Bool("offline", false,
 		"Use fallback pricing only")
+	noSync := fs.Bool("no-sync", false,
+		"Skip on-demand sync before querying")
 
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
 
-	database := openUsageDB()
+	database, appCfg := openUsageDB()
 	defer database.Close()
 
+	ensureFreshData(appCfg, database, *noSync)
 	ensurePricing(database, *offline)
 
 	today := time.Now().Format("2006-01-02")
@@ -135,7 +151,7 @@ func runUsageStatusline(args []string) {
 	}
 }
 
-func openUsageDB() *db.DB {
+func openUsageDB() (*db.DB, config.Config) {
 	cfg, err := config.LoadMinimal()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -148,7 +164,68 @@ func openUsageDB() *db.DB {
 			"error opening database: %v\n", err)
 		os.Exit(1)
 	}
-	return database
+	return database, cfg
+}
+
+// ensureFreshData makes sure the database reflects recent
+// session file changes before serving a usage query.
+//
+// Decision tree:
+//  1. If the stored data version is stale (parser changes on
+//     upgrade), run a full resync.
+//  2. If a server process is active (via state file), trust
+//     its file watcher and skip on-demand sync. This avoids
+//     duplicate work and write contention.
+//  3. Otherwise, run a quick incremental sync scoped to files
+//     modified since the last recorded sync start time, with
+//     a small safety margin.
+//
+// Callers that need stale data (e.g. offline benchmarks) can
+// bypass via skip=true.
+func ensureFreshData(
+	appCfg config.Config, database *db.DB, skip bool,
+) {
+	if skip {
+		return
+	}
+
+	ctx := context.Background()
+
+	if database.NeedsResync() {
+		engine := sync.NewEngine(database, sync.EngineConfig{
+			AgentDirs: appCfg.AgentDirs,
+			Machine:   "local",
+		})
+		fmt.Fprintln(os.Stderr,
+			"Data version changed, running full resync...")
+		engine.ResyncAll(ctx, nil)
+		return
+	}
+
+	if server.IsServerActive(appCfg.DataDir) {
+		return
+	}
+
+	engine := sync.NewEngine(database, sync.EngineConfig{
+		AgentDirs: appCfg.AgentDirs,
+		Machine:   "local",
+	})
+
+	since := engine.LastSyncStartedAt()
+	if !since.IsZero() {
+		since = since.Add(-quickSyncMargin)
+	}
+
+	// Silence engine progress and incremental-parse logging
+	// so --json and statusline output stay clean. The engine
+	// emits unconditional log.Printf calls from worker paths
+	// that aren't gated by a verbose flag, so redirect the
+	// global logger for the duration of the sync.
+	origLog := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(origLog)
+
+	engine.SyncAllSince(ctx, since, func(sync.Progress) {})
 }
 
 func ensurePricing(database *db.DB, offline bool) {
@@ -268,10 +345,12 @@ Daily flags:
   --agent string      Filter by agent (claude, codex)
   --breakdown         Show per-model breakdown rows
   --offline           Use fallback pricing only
+  --no-sync           Skip on-demand sync before querying
   --timezone string   IANA timezone for date bucketing
 
 Statusline flags:
   --agent string      Filter by agent (claude, codex)
   --offline           Use fallback pricing only
+  --no-sync           Skip on-demand sync before querying
 `)
 }
