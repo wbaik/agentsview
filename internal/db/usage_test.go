@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"strconv"
 	"testing"
+	"time"
 )
 
 func TestGetDailyUsageEmpty(t *testing.T) {
@@ -589,5 +591,952 @@ func TestGetDailyUsageLongLivedSession(t *testing.T) {
 	if result.Daily[0].InputTokens != 2000 {
 		t.Errorf("InputTokens = %d, want 2000",
 			result.Daily[0].InputTokens)
+	}
+}
+
+func TestGetDailyUsageProjectFilter(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	requireNoError(t, d.UpsertModelPricing([]ModelPricing{{
+		ModelPattern:  "claude-sonnet",
+		InputPerMTok:  3.0,
+		OutputPerMTok: 15.0,
+	}}), "UpsertModelPricing")
+
+	insertSession(t, d, "sess-a", "proj-a", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertMessages(t, d, Message{
+		SessionID:  "sess-a",
+		Ordinal:    0,
+		Role:       "assistant",
+		Timestamp:  "2024-06-15T10:30:00Z",
+		Model:      "claude-sonnet",
+		TokenUsage: json.RawMessage(`{"input_tokens":1000,"output_tokens":500}`),
+	})
+
+	insertSession(t, d, "sess-b", "proj-b", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertMessages(t, d, Message{
+		SessionID:  "sess-b",
+		Ordinal:    0,
+		Role:       "assistant",
+		Timestamp:  "2024-06-15T10:30:00Z",
+		Model:      "claude-sonnet",
+		TokenUsage: json.RawMessage(`{"input_tokens":2000,"output_tokens":1000}`),
+	})
+
+	result, err := d.GetDailyUsage(ctx, UsageFilter{
+		From:    "2024-06-01",
+		To:      "2024-06-30",
+		Project: "proj-a",
+	})
+	requireNoError(t, err, "GetDailyUsage project filter")
+
+	if len(result.Daily) != 1 {
+		t.Fatalf("got %d daily entries, want 1",
+			len(result.Daily))
+	}
+	day := result.Daily[0]
+	if day.InputTokens != 1000 {
+		t.Errorf("InputTokens = %d, want 1000 (proj-a only)",
+			day.InputTokens)
+	}
+	if result.Totals.InputTokens != 1000 {
+		t.Errorf("Totals.InputTokens = %d, want 1000",
+			result.Totals.InputTokens)
+	}
+}
+
+func TestGetDailyUsageModelFilter(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	requireNoError(t, d.UpsertModelPricing([]ModelPricing{
+		{ModelPattern: "claude-sonnet", InputPerMTok: 3.0,
+			OutputPerMTok: 15.0},
+		{ModelPattern: "gpt-5", InputPerMTok: 2.5,
+			OutputPerMTok: 10.0},
+	}), "UpsertModelPricing")
+
+	insertSession(t, d, "sess1", "proj1", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertMessages(t, d,
+		Message{
+			SessionID:  "sess1",
+			Ordinal:    0,
+			Role:       "assistant",
+			Timestamp:  "2024-06-15T10:30:00Z",
+			Model:      "claude-sonnet",
+			TokenUsage: json.RawMessage(`{"input_tokens":2000,"output_tokens":800}`),
+		},
+		Message{
+			SessionID:  "sess1",
+			Ordinal:    1,
+			Role:       "assistant",
+			Timestamp:  "2024-06-15T10:31:00Z",
+			Model:      "gpt-5",
+			TokenUsage: json.RawMessage(`{"input_tokens":1000,"output_tokens":500}`),
+		},
+	)
+
+	result, err := d.GetDailyUsage(ctx, UsageFilter{
+		From:  "2024-06-01",
+		To:    "2024-06-30",
+		Model: "gpt-5",
+	})
+	requireNoError(t, err, "GetDailyUsage model filter")
+
+	if len(result.Daily) != 1 {
+		t.Fatalf("got %d daily entries, want 1",
+			len(result.Daily))
+	}
+	day := result.Daily[0]
+	if day.InputTokens != 1000 {
+		t.Errorf("InputTokens = %d, want 1000 (gpt-5 only)",
+			day.InputTokens)
+	}
+	if len(day.ModelsUsed) != 1 || day.ModelsUsed[0] != "gpt-5" {
+		t.Errorf("ModelsUsed = %v, want [gpt-5]",
+			day.ModelsUsed)
+	}
+}
+
+func TestGetDailyUsageProjectBreakdowns(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	requireNoError(t, d.UpsertModelPricing([]ModelPricing{{
+		ModelPattern:  "claude-sonnet",
+		InputPerMTok:  3.0,
+		OutputPerMTok: 15.0,
+	}}), "UpsertModelPricing")
+
+	insertSession(t, d, "sess-a", "proj-a", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertMessages(t, d, Message{
+		SessionID:  "sess-a",
+		Ordinal:    0,
+		Role:       "assistant",
+		Timestamp:  "2024-06-15T10:30:00Z",
+		Model:      "claude-sonnet",
+		TokenUsage: json.RawMessage(`{"input_tokens":1000,"output_tokens":500}`),
+	})
+
+	insertSession(t, d, "sess-b", "proj-b", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertMessages(t, d, Message{
+		SessionID:  "sess-b",
+		Ordinal:    0,
+		Role:       "assistant",
+		Timestamp:  "2024-06-15T10:30:00Z",
+		Model:      "claude-sonnet",
+		TokenUsage: json.RawMessage(`{"input_tokens":1000,"output_tokens":500}`),
+	})
+
+	result, err := d.GetDailyUsage(ctx, UsageFilter{
+		From:       "2024-06-01",
+		To:         "2024-06-30",
+		Breakdowns: true,
+	})
+	requireNoError(t, err, "GetDailyUsage project breakdowns")
+
+	if len(result.Daily) != 1 {
+		t.Fatalf("got %d daily entries, want 1",
+			len(result.Daily))
+	}
+	day := result.Daily[0]
+	if len(day.ProjectBreakdowns) != 2 {
+		t.Fatalf("ProjectBreakdowns len = %d, want 2",
+			len(day.ProjectBreakdowns))
+	}
+
+	projMap := make(map[string]ProjectBreakdown)
+	var projCostSum float64
+	for _, pb := range day.ProjectBreakdowns {
+		projMap[pb.Project] = pb
+		projCostSum += pb.Cost
+	}
+	for _, name := range []string{"proj-a", "proj-b"} {
+		pb, ok := projMap[name]
+		if !ok {
+			t.Errorf("missing ProjectBreakdown for %s", name)
+			continue
+		}
+		if pb.InputTokens != 1000 {
+			t.Errorf("%s InputTokens = %d, want 1000",
+				name, pb.InputTokens)
+		}
+	}
+	if math.Abs(projCostSum-day.TotalCost) > 1e-9 {
+		t.Errorf("sum(ProjectBreakdowns.Cost) = %v, "+
+			"want TotalCost = %v", projCostSum, day.TotalCost)
+	}
+}
+
+func TestGetDailyUsageAgentBreakdowns(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	requireNoError(t, d.UpsertModelPricing([]ModelPricing{{
+		ModelPattern:  "claude-sonnet",
+		InputPerMTok:  3.0,
+		OutputPerMTok: 15.0,
+	}}), "UpsertModelPricing")
+
+	insertSession(t, d, "sess-claude", "proj1", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertMessages(t, d, Message{
+		SessionID:  "sess-claude",
+		Ordinal:    0,
+		Role:       "assistant",
+		Timestamp:  "2024-06-15T10:30:00Z",
+		Model:      "claude-sonnet",
+		TokenUsage: json.RawMessage(`{"input_tokens":1000,"output_tokens":500}`),
+	})
+
+	insertSession(t, d, "sess-codex", "proj1", func(s *Session) {
+		s.Agent = "codex"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertMessages(t, d, Message{
+		SessionID:  "sess-codex",
+		Ordinal:    0,
+		Role:       "assistant",
+		Timestamp:  "2024-06-15T10:30:00Z",
+		Model:      "claude-sonnet",
+		TokenUsage: json.RawMessage(`{"input_tokens":1000,"output_tokens":500}`),
+	})
+
+	result, err := d.GetDailyUsage(ctx, UsageFilter{
+		From:       "2024-06-01",
+		To:         "2024-06-30",
+		Breakdowns: true,
+	})
+	requireNoError(t, err, "GetDailyUsage agent breakdowns")
+
+	if len(result.Daily) != 1 {
+		t.Fatalf("got %d daily entries, want 1",
+			len(result.Daily))
+	}
+	day := result.Daily[0]
+	if len(day.AgentBreakdowns) != 2 {
+		t.Fatalf("AgentBreakdowns len = %d, want 2",
+			len(day.AgentBreakdowns))
+	}
+
+	agentMap := make(map[string]AgentBreakdown)
+	var agentCostSum float64
+	for _, ab := range day.AgentBreakdowns {
+		agentMap[ab.Agent] = ab
+		agentCostSum += ab.Cost
+	}
+	for _, name := range []string{"claude", "codex"} {
+		ab, ok := agentMap[name]
+		if !ok {
+			t.Errorf("missing AgentBreakdown for %s", name)
+			continue
+		}
+		if ab.InputTokens != 1000 {
+			t.Errorf("%s InputTokens = %d, want 1000",
+				name, ab.InputTokens)
+		}
+	}
+	if math.Abs(agentCostSum-day.TotalCost) > 1e-9 {
+		t.Errorf("sum(AgentBreakdowns.Cost) = %v, "+
+			"want TotalCost = %v", agentCostSum, day.TotalCost)
+	}
+}
+
+func TestGetDailyUsageBreakdownInvariant(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	requireNoError(t, d.UpsertModelPricing([]ModelPricing{
+		{ModelPattern: "model-a", InputPerMTok: 2.0,
+			OutputPerMTok: 10.0},
+		{ModelPattern: "model-b", InputPerMTok: 4.0,
+			OutputPerMTok: 20.0},
+	}), "UpsertModelPricing")
+
+	// 2 projects x 2 agents = 4 sessions, each with 2 messages
+	// from different models.
+	type combo struct {
+		project string
+		agent   string
+	}
+	combos := []combo{
+		{"proj-a", "claude"},
+		{"proj-a", "codex"},
+		{"proj-b", "claude"},
+		{"proj-b", "codex"},
+	}
+	for i, c := range combos {
+		sid := "sess-" + strconv.Itoa(i)
+		insertSession(t, d, sid, c.project, func(s *Session) {
+			s.Agent = c.agent
+			s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+		})
+		insertMessages(t, d,
+			Message{
+				SessionID:  sid,
+				Ordinal:    0,
+				Role:       "assistant",
+				Timestamp:  "2024-06-15T10:30:00Z",
+				Model:      "model-a",
+				TokenUsage: json.RawMessage(`{"input_tokens":1000,"output_tokens":500}`),
+			},
+			Message{
+				SessionID:  sid,
+				Ordinal:    1,
+				Role:       "assistant",
+				Timestamp:  "2024-06-15T10:31:00Z",
+				Model:      "model-b",
+				TokenUsage: json.RawMessage(`{"input_tokens":1000,"output_tokens":500}`),
+			},
+		)
+	}
+
+	result, err := d.GetDailyUsage(ctx, UsageFilter{
+		From:       "2024-06-01",
+		To:         "2024-06-30",
+		Breakdowns: true,
+	})
+	requireNoError(t, err, "GetDailyUsage breakdown invariant")
+
+	if len(result.Daily) != 1 {
+		t.Fatalf("got %d daily entries, want 1",
+			len(result.Daily))
+	}
+	day := result.Daily[0]
+
+	var modelCostSum float64
+	for _, mb := range day.ModelBreakdowns {
+		modelCostSum += mb.Cost
+	}
+	var projectCostSum float64
+	for _, pb := range day.ProjectBreakdowns {
+		projectCostSum += pb.Cost
+	}
+	var agentCostSum float64
+	for _, ab := range day.AgentBreakdowns {
+		agentCostSum += ab.Cost
+	}
+
+	if math.Abs(modelCostSum-day.TotalCost) > 1e-9 {
+		t.Errorf("sum(ModelBreakdowns.Cost) = %v, "+
+			"want TotalCost = %v", modelCostSum, day.TotalCost)
+	}
+	if math.Abs(projectCostSum-day.TotalCost) > 1e-9 {
+		t.Errorf("sum(ProjectBreakdowns.Cost) = %v, "+
+			"want TotalCost = %v", projectCostSum, day.TotalCost)
+	}
+	if math.Abs(agentCostSum-day.TotalCost) > 1e-9 {
+		t.Errorf("sum(AgentBreakdowns.Cost) = %v, "+
+			"want TotalCost = %v", agentCostSum, day.TotalCost)
+	}
+	if math.Abs(modelCostSum-projectCostSum) > 1e-9 {
+		t.Errorf("model cost sum %v != project cost sum %v",
+			modelCostSum, projectCostSum)
+	}
+	if math.Abs(modelCostSum-agentCostSum) > 1e-9 {
+		t.Errorf("model cost sum %v != agent cost sum %v",
+			modelCostSum, agentCostSum)
+	}
+}
+
+// BenchmarkGetDailyUsage measures the hot-path scan over a realistic
+// synthetic dataset. The baseline number (captured against the commit
+// that introduces this benchmark) is the non-regression budget for all
+// subsequent changes to GetDailyUsage: new code must land within +10%.
+//
+// See docs/specs/2026-04-12-token-usage-ui-design.md for the full
+// non-destructive benchmark procedure.
+func TestGetTopSessionsByCost(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	requireNoError(t, d.UpsertModelPricing([]ModelPricing{{
+		ModelPattern:         "claude-sonnet",
+		InputPerMTok:         3.0,
+		OutputPerMTok:        15.0,
+		CacheCreationPerMTok: 3.75,
+		CacheReadPerMTok:     0.30,
+	}}), "UpsertModelPricing")
+
+	// Expensive session
+	insertSession(t, d, "sBig", "proj-a", func(s *Session) {
+		s.Agent = "claude"
+		s.DisplayName = Ptr("Big Session")
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertMessages(t, d, Message{
+		SessionID: "sBig", Ordinal: 0,
+		Role: "assistant", Timestamp: "2024-06-15T10:30:00Z",
+		Model: "claude-sonnet",
+		TokenUsage: json.RawMessage(
+			`{"input_tokens":5000,"output_tokens":2000,` +
+				`"cache_creation_input_tokens":1000,` +
+				`"cache_read_input_tokens":3000}`),
+	})
+
+	// Cheap session
+	insertSession(t, d, "sSmall", "proj-b", func(s *Session) {
+		s.Agent = "codex"
+		s.DisplayName = Ptr("Small Session")
+		s.StartedAt = Ptr("2024-06-15T11:00:00Z")
+	})
+	insertMessages(t, d, Message{
+		SessionID: "sSmall", Ordinal: 0,
+		Role: "assistant", Timestamp: "2024-06-15T11:30:00Z",
+		Model: "claude-sonnet",
+		TokenUsage: json.RawMessage(
+			`{"input_tokens":100,"output_tokens":50,` +
+				`"cache_creation_input_tokens":10,` +
+				`"cache_read_input_tokens":20}`),
+	})
+
+	top, err := d.GetTopSessionsByCost(ctx, UsageFilter{
+		From: "2024-06-01",
+		To:   "2024-06-30",
+	}, 20)
+	requireNoError(t, err, "GetTopSessionsByCost")
+
+	if len(top) != 2 {
+		t.Fatalf("got %d entries, want 2", len(top))
+	}
+
+	// Ordered cost desc — sBig first
+	if top[0].SessionID != "sBig" {
+		t.Errorf("top[0].SessionID = %q, want sBig",
+			top[0].SessionID)
+	}
+	if top[0].DisplayName != "Big Session" {
+		t.Errorf("top[0].DisplayName = %q, want Big Session",
+			top[0].DisplayName)
+	}
+	if top[0].Project != "proj-a" {
+		t.Errorf("top[0].Project = %q, want proj-a",
+			top[0].Project)
+	}
+	if top[0].Agent != "claude" {
+		t.Errorf("top[0].Agent = %q, want claude",
+			top[0].Agent)
+	}
+	// TotalTokens = 5000 + 2000 + 1000 + 3000 = 11000
+	if top[0].TotalTokens != 11000 {
+		t.Errorf("top[0].TotalTokens = %d, want 11000",
+			top[0].TotalTokens)
+	}
+	if top[0].Cost <= 0 {
+		t.Errorf("top[0].Cost = %v, want > 0", top[0].Cost)
+	}
+
+	if top[1].SessionID != "sSmall" {
+		t.Errorf("top[1].SessionID = %q, want sSmall",
+			top[1].SessionID)
+	}
+	if top[0].Cost <= top[1].Cost {
+		t.Errorf("top[0].Cost (%v) should be > top[1].Cost (%v)",
+			top[0].Cost, top[1].Cost)
+	}
+}
+
+func TestGetTopSessionsByCostLimit(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	requireNoError(t, d.UpsertModelPricing([]ModelPricing{{
+		ModelPattern:  "claude-sonnet",
+		InputPerMTok:  3.0,
+		OutputPerMTok: 15.0,
+	}}), "UpsertModelPricing")
+
+	for i := range 5 {
+		sid := "sess-" + strconv.Itoa(i)
+		insertSession(t, d, sid, "proj", func(s *Session) {
+			s.Agent = "claude"
+			s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+		})
+		insertMessages(t, d, Message{
+			SessionID: sid, Ordinal: 0,
+			Role: "assistant", Timestamp: "2024-06-15T10:30:00Z",
+			Model: "claude-sonnet",
+			TokenUsage: json.RawMessage(
+				`{"input_tokens":1000,"output_tokens":500}`),
+		})
+	}
+
+	top, err := d.GetTopSessionsByCost(ctx, UsageFilter{
+		From: "2024-06-01",
+		To:   "2024-06-30",
+	}, 3)
+	requireNoError(t, err, "GetTopSessionsByCost limit")
+
+	if len(top) != 3 {
+		t.Fatalf("got %d entries, want 3", len(top))
+	}
+}
+
+func TestGetUsageSessionCounts(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	// s1: proj-a / claude — TWO messages across TWO days
+	insertSession(t, d, "s1", "proj-a", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertMessages(t, d,
+		Message{
+			SessionID: "s1", Ordinal: 0,
+			Role: "assistant", Timestamp: "2024-06-15T10:30:00Z",
+			Model: "claude-sonnet",
+			TokenUsage: json.RawMessage(
+				`{"input_tokens":100,"output_tokens":50}`),
+		},
+		Message{
+			SessionID: "s1", Ordinal: 1,
+			Role: "assistant", Timestamp: "2024-06-16T10:30:00Z",
+			Model: "claude-sonnet",
+			TokenUsage: json.RawMessage(
+				`{"input_tokens":200,"output_tokens":100}`),
+		},
+	)
+
+	// s2: proj-a / codex
+	insertSession(t, d, "s2", "proj-a", func(s *Session) {
+		s.Agent = "codex"
+		s.StartedAt = Ptr("2024-06-15T11:00:00Z")
+	})
+	insertMessages(t, d, Message{
+		SessionID: "s2", Ordinal: 0,
+		Role: "assistant", Timestamp: "2024-06-15T11:30:00Z",
+		Model: "claude-sonnet",
+		TokenUsage: json.RawMessage(
+			`{"input_tokens":100,"output_tokens":50}`),
+	})
+
+	// s3: proj-b / claude
+	insertSession(t, d, "s3", "proj-b", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T12:00:00Z")
+	})
+	insertMessages(t, d, Message{
+		SessionID: "s3", Ordinal: 0,
+		Role: "assistant", Timestamp: "2024-06-15T12:30:00Z",
+		Model: "claude-sonnet",
+		TokenUsage: json.RawMessage(
+			`{"input_tokens":100,"output_tokens":50}`),
+	})
+
+	counts, err := d.GetUsageSessionCounts(ctx, UsageFilter{
+		From: "2024-06-01",
+		To:   "2024-06-30",
+	})
+	requireNoError(t, err, "GetUsageSessionCounts")
+
+	if counts.Total != 3 {
+		t.Errorf("Total = %d, want 3", counts.Total)
+	}
+	if counts.ByProject["proj-a"] != 2 {
+		t.Errorf("ByProject[proj-a] = %d, want 2",
+			counts.ByProject["proj-a"])
+	}
+	if counts.ByProject["proj-b"] != 1 {
+		t.Errorf("ByProject[proj-b] = %d, want 1",
+			counts.ByProject["proj-b"])
+	}
+	if counts.ByAgent["claude"] != 2 {
+		t.Errorf("ByAgent[claude] = %d, want 2",
+			counts.ByAgent["claude"])
+	}
+	if counts.ByAgent["codex"] != 1 {
+		t.Errorf("ByAgent[codex] = %d, want 1",
+			counts.ByAgent["codex"])
+	}
+}
+
+// TestUsageQueryEligibilityParity seeds messages that fail each
+// disqualification predicate and asserts all three usage queries
+// ignore them. Guardrail against drift between usage queries.
+func TestUsageQueryEligibilityParity(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	requireNoError(t, d.UpsertModelPricing([]ModelPricing{{
+		ModelPattern:  "claude-sonnet",
+		InputPerMTok:  3.0,
+		OutputPerMTok: 15.0,
+	}}), "UpsertModelPricing")
+
+	// Good session — should be visible to all queries.
+	insertSession(t, d, "good", "proj", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertMessages(t, d, Message{
+		SessionID: "good", Ordinal: 0,
+		Role: "assistant", Timestamp: "2024-06-15T10:30:00Z",
+		Model: "claude-sonnet",
+		TokenUsage: json.RawMessage(
+			`{"input_tokens":1000,"output_tokens":500}`),
+	})
+
+	// Bad: empty token_usage
+	insertSession(t, d, "bad-empty", "proj", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertMessages(t, d, Message{
+		SessionID: "bad-empty", Ordinal: 0,
+		Role: "assistant", Timestamp: "2024-06-15T10:30:00Z",
+		Model:      "claude-sonnet",
+		TokenUsage: json.RawMessage(""),
+	})
+
+	// Bad: synthetic model
+	insertSession(t, d, "bad-synth", "proj", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertMessages(t, d, Message{
+		SessionID: "bad-synth", Ordinal: 0,
+		Role: "assistant", Timestamp: "2024-06-15T10:30:00Z",
+		Model: "<synthetic>",
+		TokenUsage: json.RawMessage(
+			`{"input_tokens":999,"output_tokens":999}`),
+	})
+
+	// Bad: soft-deleted session
+	insertSession(t, d, "bad-deleted", "proj", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertMessages(t, d, Message{
+		SessionID: "bad-deleted", Ordinal: 0,
+		Role: "assistant", Timestamp: "2024-06-15T10:30:00Z",
+		Model: "claude-sonnet",
+		TokenUsage: json.RawMessage(
+			`{"input_tokens":999,"output_tokens":999}`),
+	})
+	requireNoError(t,
+		d.SoftDeleteSession("bad-deleted"),
+		"SoftDeleteSession")
+
+	filter := UsageFilter{
+		From:       "2024-06-01",
+		To:         "2024-06-30",
+		Breakdowns: true,
+	}
+
+	// GetDailyUsage
+	daily, err := d.GetDailyUsage(ctx, filter)
+	requireNoError(t, err, "GetDailyUsage parity")
+	if daily.Totals.InputTokens != 1000 {
+		t.Errorf("GetDailyUsage InputTokens = %d, want 1000",
+			daily.Totals.InputTokens)
+	}
+
+	// GetUsageSessionCounts
+	counts, err := d.GetUsageSessionCounts(ctx, filter)
+	requireNoError(t, err, "GetUsageSessionCounts parity")
+	if counts.Total != 1 {
+		t.Errorf("GetUsageSessionCounts Total = %d, want 1",
+			counts.Total)
+	}
+
+	// GetTopSessionsByCost
+	top, err := d.GetTopSessionsByCost(ctx, filter, 20)
+	requireNoError(t, err, "GetTopSessionsByCost parity")
+	if len(top) != 1 {
+		t.Fatalf("GetTopSessionsByCost len = %d, want 1",
+			len(top))
+	}
+	if top[0].SessionID != "good" {
+		t.Errorf("GetTopSessionsByCost[0].SessionID = %q, "+
+			"want good", top[0].SessionID)
+	}
+}
+
+// TestExcludeProjectFilter verifies that ExcludeProject removes
+// matching projects from all three usage queries.
+func TestExcludeProjectFilter(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	requireNoError(t, d.UpsertModelPricing([]ModelPricing{{
+		ModelPattern:  "claude-sonnet",
+		InputPerMTok:  3.0,
+		OutputPerMTok: 15.0,
+	}}), "UpsertModelPricing")
+
+	insertSession(t, d, "sA", "proj-a", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertSession(t, d, "sB", "proj-b", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertSession(t, d, "sC", "proj-c", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+
+	usage := `{"input_tokens":1000,"output_tokens":500}`
+	insertMessages(t, d,
+		Message{SessionID: "sA", Ordinal: 0, Role: "assistant",
+			Timestamp: "2024-06-15T10:30:00Z", Model: "claude-sonnet",
+			TokenUsage: json.RawMessage(usage)},
+		Message{SessionID: "sB", Ordinal: 0, Role: "assistant",
+			Timestamp: "2024-06-15T10:30:00Z", Model: "claude-sonnet",
+			TokenUsage: json.RawMessage(usage)},
+		Message{SessionID: "sC", Ordinal: 0, Role: "assistant",
+			Timestamp: "2024-06-15T10:30:00Z", Model: "claude-sonnet",
+			TokenUsage: json.RawMessage(usage)},
+	)
+
+	base := UsageFilter{From: "2024-06-01", To: "2024-06-30"}
+
+	// Exclude one project.
+	f1 := base
+	f1.ExcludeProject = "proj-b"
+	daily, err := d.GetDailyUsage(ctx, f1)
+	requireNoError(t, err, "GetDailyUsage exclude one")
+	if daily.Totals.InputTokens != 2000 {
+		t.Errorf("exclude proj-b: InputTokens = %d, want 2000",
+			daily.Totals.InputTokens)
+	}
+
+	// Exclude two projects (comma-separated).
+	f2 := base
+	f2.ExcludeProject = "proj-a,proj-c"
+	daily, err = d.GetDailyUsage(ctx, f2)
+	requireNoError(t, err, "GetDailyUsage exclude two")
+	if daily.Totals.InputTokens != 1000 {
+		t.Errorf("exclude a+c: InputTokens = %d, want 1000",
+			daily.Totals.InputTokens)
+	}
+
+	// GetTopSessionsByCost with exclude.
+	top, err := d.GetTopSessionsByCost(ctx, f1, 10)
+	requireNoError(t, err, "GetTopSessionsByCost exclude")
+	if len(top) != 2 {
+		t.Fatalf("exclude proj-b: top len = %d, want 2", len(top))
+	}
+	for _, ts := range top {
+		if ts.Project == "proj-b" {
+			t.Errorf("excluded proj-b still in top sessions")
+		}
+	}
+
+	// GetUsageSessionCounts with exclude.
+	counts, err := d.GetUsageSessionCounts(ctx, f1)
+	requireNoError(t, err, "GetUsageSessionCounts exclude")
+	if counts.Total != 2 {
+		t.Errorf("exclude proj-b: Total = %d, want 2", counts.Total)
+	}
+	if counts.ByProject["proj-b"] != 0 {
+		t.Errorf("excluded proj-b count = %d, want 0",
+			counts.ByProject["proj-b"])
+	}
+}
+
+// TestExcludeAgentFilter verifies ExcludeAgent on GetDailyUsage.
+func TestExcludeAgentFilter(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	requireNoError(t, d.UpsertModelPricing([]ModelPricing{{
+		ModelPattern:  "claude-sonnet",
+		InputPerMTok:  3.0,
+		OutputPerMTok: 15.0,
+	}}), "UpsertModelPricing")
+
+	insertSession(t, d, "s1", "proj", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+	insertSession(t, d, "s2", "proj", func(s *Session) {
+		s.Agent = "codex"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+
+	usage := `{"input_tokens":1000,"output_tokens":500}`
+	insertMessages(t, d,
+		Message{SessionID: "s1", Ordinal: 0, Role: "assistant",
+			Timestamp: "2024-06-15T10:30:00Z", Model: "claude-sonnet",
+			TokenUsage: json.RawMessage(usage)},
+		Message{SessionID: "s2", Ordinal: 0, Role: "assistant",
+			Timestamp: "2024-06-15T10:30:00Z", Model: "claude-sonnet",
+			TokenUsage: json.RawMessage(usage)},
+	)
+
+	f := UsageFilter{
+		From:         "2024-06-01",
+		To:           "2024-06-30",
+		ExcludeAgent: "codex",
+	}
+	daily, err := d.GetDailyUsage(ctx, f)
+	requireNoError(t, err, "GetDailyUsage exclude agent")
+	if daily.Totals.InputTokens != 1000 {
+		t.Errorf("exclude codex: InputTokens = %d, want 1000",
+			daily.Totals.InputTokens)
+	}
+}
+
+// TestExcludeModelFilter verifies ExcludeModel on GetDailyUsage.
+func TestExcludeModelFilter(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	requireNoError(t, d.UpsertModelPricing([]ModelPricing{
+		{ModelPattern: "sonnet", InputPerMTok: 3.0,
+			OutputPerMTok: 15.0},
+		{ModelPattern: "opus", InputPerMTok: 15.0,
+			OutputPerMTok: 75.0},
+	}), "UpsertModelPricing")
+
+	insertSession(t, d, "s1", "proj", func(s *Session) {
+		s.Agent = "claude"
+		s.StartedAt = Ptr("2024-06-15T10:00:00Z")
+	})
+
+	insertMessages(t, d,
+		Message{SessionID: "s1", Ordinal: 0, Role: "assistant",
+			Timestamp: "2024-06-15T10:30:00Z", Model: "sonnet",
+			TokenUsage: json.RawMessage(
+				`{"input_tokens":1000,"output_tokens":500}`)},
+		Message{SessionID: "s1", Ordinal: 1, Role: "assistant",
+			Timestamp: "2024-06-15T11:30:00Z", Model: "opus",
+			TokenUsage: json.RawMessage(
+				`{"input_tokens":1000,"output_tokens":500}`)},
+	)
+
+	f := UsageFilter{
+		From:         "2024-06-01",
+		To:           "2024-06-30",
+		ExcludeModel: "opus",
+	}
+	daily, err := d.GetDailyUsage(ctx, f)
+	requireNoError(t, err, "GetDailyUsage exclude model")
+	if daily.Totals.InputTokens != 1000 {
+		t.Errorf("exclude opus: InputTokens = %d, want 1000",
+			daily.Totals.InputTokens)
+	}
+	if len(daily.Daily) != 1 {
+		t.Fatalf("daily len = %d, want 1", len(daily.Daily))
+	}
+	for _, mb := range daily.Daily[0].ModelBreakdowns {
+		if mb.ModelName == "opus" {
+			t.Errorf("excluded model opus still in breakdowns")
+		}
+	}
+}
+
+func BenchmarkGetDailyUsage(b *testing.B) {
+	d := testDB(&testing.T{})
+	ctx := context.Background()
+
+	if err := d.UpsertModelPricing([]ModelPricing{
+		{ModelPattern: "claude-sonnet-4-20250514",
+			InputPerMTok: 3.0, OutputPerMTok: 15.0,
+			CacheCreationPerMTok: 3.75, CacheReadPerMTok: 0.30},
+		{ModelPattern: "claude-opus-4-20250514",
+			InputPerMTok: 15.0, OutputPerMTok: 75.0,
+			CacheCreationPerMTok: 18.75, CacheReadPerMTok: 1.50},
+		{ModelPattern: "gpt-5",
+			InputPerMTok: 2.5, OutputPerMTok: 10.0,
+			CacheCreationPerMTok: 2.5, CacheReadPerMTok: 0.25},
+		{ModelPattern: "gemini-2.5-pro",
+			InputPerMTok: 1.25, OutputPerMTok: 5.0,
+			CacheCreationPerMTok: 1.25, CacheReadPerMTok: 0.125},
+	}); err != nil {
+		b.Fatalf("UpsertModelPricing: %v", err)
+	}
+
+	projects := []string{
+		"agentsview", "quokka", "arrow-rs", "side-quests",
+		"infrastructure", "blog", "experiments", "docs",
+		"dotfiles", "playground",
+	}
+	agents := []string{"claude", "codex", "openhands"}
+	models := []string{
+		"claude-sonnet-4-20250514",
+		"claude-opus-4-20250514",
+		"gpt-5",
+		"gemini-2.5-pro",
+	}
+
+	// 500 sessions × 200 messages each = 100k rows.
+	const sessionCount = 500
+	const msgsPerSession = 200
+
+	tokenUsage := `{"input_tokens":1200,"output_tokens":480,` +
+		`"cache_creation_input_tokens":300,` +
+		`"cache_read_input_tokens":2400}`
+
+	// Pre-parse the anchor timestamp once; the seed loop offsets from it.
+	startTime, err := time.Parse(time.RFC3339, "2024-06-01T00:00:00Z")
+	if err != nil {
+		b.Fatalf("parsing start time: %v", err)
+	}
+
+	for i := range sessionCount {
+		id := "bench-sess-" + strconv.Itoa(i)
+		project := projects[i%len(projects)]
+		agent := agents[i%len(agents)]
+		// Spread sessions across a 60-day window.
+		dayOffset := i % 60
+		s := Session{
+			ID:           id,
+			Project:      project,
+			Machine:      defaultMachine,
+			Agent:        agent,
+			MessageCount: msgsPerSession,
+			StartedAt:    Ptr(startTime.Format(time.RFC3339)),
+		}
+		if err := d.UpsertSession(s); err != nil {
+			b.Fatalf("UpsertSession: %v", err)
+		}
+		msgs := make([]Message, msgsPerSession)
+		for j := range msgsPerSession {
+			msgs[j] = Message{
+				SessionID:  id,
+				Ordinal:    j,
+				Role:       "assistant",
+				Timestamp:  startTime.AddDate(0, 0, dayOffset).Format(time.RFC3339),
+				Model:      models[(i+j)%len(models)],
+				TokenUsage: json.RawMessage(tokenUsage),
+			}
+		}
+		if err := d.InsertMessages(msgs); err != nil {
+			b.Fatalf("InsertMessages: %v", err)
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, err := d.GetDailyUsage(ctx, UsageFilter{
+			From: "2024-06-01",
+			To:   "2024-08-01",
+		})
+		if err != nil {
+			b.Fatalf("GetDailyUsage: %v", err)
+		}
 	}
 }

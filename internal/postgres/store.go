@@ -68,6 +68,36 @@ func (s *Store) GetSessionVersion(
 }
 
 // ------------------------------------------------------------
+// Usage stubs (not yet implemented for PG)
+// ------------------------------------------------------------
+
+// GetDailyUsage is not implemented for PG.
+func (s *Store) GetDailyUsage(
+	_ context.Context, _ db.UsageFilter,
+) (db.DailyUsageResult, error) {
+	return db.DailyUsageResult{
+		Daily: []db.DailyUsageEntry{},
+	}, nil
+}
+
+// GetTopSessionsByCost is not implemented for PG.
+func (s *Store) GetTopSessionsByCost(
+	_ context.Context, _ db.UsageFilter, _ int,
+) ([]db.TopSessionEntry, error) {
+	return []db.TopSessionEntry{}, nil
+}
+
+// GetUsageSessionCounts is not implemented for PG.
+func (s *Store) GetUsageSessionCounts(
+	_ context.Context, _ db.UsageFilter,
+) (db.UsageSessionCounts, error) {
+	return db.UsageSessionCounts{
+		ByProject: make(map[string]int),
+		ByAgent:   make(map[string]int),
+	}, nil
+}
+
+// ------------------------------------------------------------
 // Write stubs (all return db.ErrReadOnly)
 // ------------------------------------------------------------
 
