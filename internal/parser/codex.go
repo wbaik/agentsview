@@ -1017,9 +1017,15 @@ func extractCodexContent(payload gjson.Result) string {
 	return strings.Join(texts, "\n")
 }
 
-// IsCodexExecSessionFile reports whether the first non-empty
-// session_meta line in a Codex JSONL file has
-// originator=="codex_exec".
+// IsCodexExecSessionFile reports whether any session_meta
+// line in a Codex JSONL file has originator=="codex_exec".
+// The pre-bulk-sync parser called handleSessionMeta on every
+// session_meta line and flagged the whole session as exec if
+// any of them carried that originator, so a one-shot check
+// of only the first session_meta would miss files that were
+// originally skipped because a later session_meta set the
+// originator. Scan all session_meta lines to match the old
+// skip condition exactly.
 func IsCodexExecSessionFile(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
@@ -1037,8 +1043,10 @@ func IsCodexExecSessionFile(path string) bool {
 		if gjson.Get(line, "type").Str != codexTypeSessionMeta {
 			continue
 		}
-		return gjson.Get(line, "payload.originator").Str ==
-			codexOriginatorExec
+		if gjson.Get(line, "payload.originator").Str ==
+			codexOriginatorExec {
+			return true
+		}
 	}
 	return false
 }

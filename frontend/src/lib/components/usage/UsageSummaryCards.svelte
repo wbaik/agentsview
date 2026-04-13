@@ -33,11 +33,15 @@
     usage.summary?.totals.outputTokens ?? 0,
   );
 
-  const cachedTokens = $derived.by(() => {
-    const t = usage.summary?.totals;
-    if (!t) return 0;
-    return t.cacheCreationTokens + t.cacheReadTokens;
-  });
+  // "cached" here means input tokens that were actually
+  // served from cache, i.e. cacheReadTokens. Cache-creation
+  // tokens are cache writes — fresh input paying the
+  // cache-write surcharge rather than being replayed from
+  // cache — so folding them in would overstate cache usage
+  // on workloads that only warm the cache.
+  const cachedTokens = $derived(
+    usage.summary?.totals.cacheReadTokens ?? 0,
+  );
 
   const dailyBurn = $derived.by(() => {
     const s = usage.summary;

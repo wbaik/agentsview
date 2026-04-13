@@ -619,6 +619,17 @@ func TestSyncAllImportsCodexExecFromLegacySkipCache(
 		t.Fatalf("seed skipped files: %v", err)
 	}
 
+	// setupTestEnv already built an engine, which ran the
+	// codex exec migration against an empty skip cache and
+	// flipped the flag to "done". Reset the flag so the new
+	// engine below observes a legacy skip entry and scrubs
+	// it, matching the production upgrade path.
+	if err := env.db.SetSyncState(
+		sync.CodexExecMigrationKey, "",
+	); err != nil {
+		t.Fatalf("reset migration flag: %v", err)
+	}
+
 	env.engine = sync.NewEngine(env.db, sync.EngineConfig{
 		AgentDirs: map[parser.AgentType][]string{
 			parser.AgentClaude:   {env.claudeDir},

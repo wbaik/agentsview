@@ -50,9 +50,16 @@ type Engine struct {
 	skipCache map[string]int64
 }
 
+// codexExecMigrationKey is the pg_sync_state flag that
+// records whether the one-time cleanup of legacy codex_exec
+// skip cache entries has already run on this database.
+const codexExecMigrationKey = "codex_exec_legacy_migration_v1"
+
 // NewEngine creates a sync engine. It pre-populates the
 // in-memory skip cache from the database so that files
-// skipped in a prior run are not re-parsed on startup.
+// skipped in a prior run are not re-parsed on startup, and
+// migrates legacy codex_exec skip entries on first run under
+// the new bulk-sync behavior.
 func NewEngine(
 	database *db.DB, cfg EngineConfig,
 ) *Engine {
@@ -62,6 +69,8 @@ func NewEngine(
 	} else {
 		log.Printf("loading skip cache: %v", err)
 	}
+
+	migrateLegacyCodexExecSkips(database, skipCache)
 
 	dirs := make(map[parser.AgentType][]string, len(cfg.AgentDirs))
 	for k, v := range cfg.AgentDirs {
@@ -74,6 +83,59 @@ func NewEngine(
 		machine:                 cfg.Machine,
 		blockedResultCategories: blockedCategorySet(cfg.BlockedResultCategories),
 		skipCache:               skipCache,
+	}
+}
+
+// migrateLegacyCodexExecSkips removes skip cache entries
+// created by older agentsview builds that excluded Codex exec
+// sessions from bulk sync. The scrub runs once per database:
+// a `pg_sync_state` flag is set after the first successful
+// pass so subsequent process starts do not re-scan files.
+// New skip entries for real parse errors on exec files are
+// untouched here and honored normally on later syncs.
+func migrateLegacyCodexExecSkips(
+	database *db.DB, skipCache map[string]int64,
+) {
+	done, err := database.GetSyncState(codexExecMigrationKey)
+	if err != nil {
+		log.Printf("codex exec migration: %v", err)
+		return
+	}
+	if done != "" {
+		return
+	}
+
+	removed := 0
+	for path := range skipCache {
+		if !strings.HasSuffix(path, ".jsonl") {
+			continue
+		}
+		if !parser.IsCodexExecSessionFile(path) {
+			continue
+		}
+		delete(skipCache, path)
+		if err := database.DeleteSkippedFile(path); err != nil {
+			log.Printf(
+				"codex exec migration: delete %s: %v",
+				path, err,
+			)
+		}
+		removed++
+	}
+
+	if err := database.SetSyncState(
+		codexExecMigrationKey, "done",
+	); err != nil {
+		log.Printf(
+			"codex exec migration: set flag: %v", err,
+		)
+		return
+	}
+	if removed > 0 {
+		log.Printf(
+			"codex exec legacy migration: cleared %d skip entries",
+			removed,
+		)
 	}
 }
 
@@ -1471,19 +1533,16 @@ func (e *Engine) processFile(
 
 	// Skip files cached from a previous sync (parse errors
 	// or non-interactive sessions) whose mtime is unchanged.
+	// Legacy codex_exec entries from pre-bulk-sync builds are
+	// scrubbed once at engine construction by
+	// migrateLegacyCodexExecSkips, so this check can treat
+	// the skip cache as authoritative without per-file
+	// re-validation.
 	e.skipMu.RLock()
 	cachedMtime, cached := e.skipCache[file.Path]
 	e.skipMu.RUnlock()
 	if cached && cachedMtime == mtime {
-		// Older agentsview builds cached codex_exec files as
-		// non-interactive. Re-check and unskip those files so
-		// the new bulk-sync behavior can import them.
-		if file.Agent == parser.AgentCodex &&
-			parser.IsCodexExecSessionFile(file.Path) {
-			e.clearSkip(file.Path)
-		} else {
-			return processResult{skip: true, mtime: mtime}
-		}
+		return processResult{skip: true, mtime: mtime}
 	}
 
 	var res processResult
