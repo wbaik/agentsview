@@ -1174,27 +1174,15 @@ func readCodexModelAtOffset(
 // the newly parsed messages (with ordinals starting at
 // startOrdinal) and the latest timestamp seen. Used for
 // incremental re-parsing of large append-only session files.
-//
-// lastModel seeds the builder's currentModel so that messages
-// appearing before the first turn_context in the new chunk
-// inherit the correct model. Callers should pass the value
-// from IncrementalInfo.LastModel (fast DB lookup). When
-// lastModel is empty, the function falls back to a file
-// pre-scan via readCodexModelAtOffset.
 func ParseCodexSessionFrom(
 	path string,
 	offset int64,
 	startOrdinal int,
 	includeExec bool,
-	lastModel string,
 ) ([]ParsedMessage, time.Time, int64, error) {
 	b := newCodexSessionBuilder(includeExec)
 	b.ordinal = startOrdinal
-	if lastModel != "" {
-		b.currentModel = lastModel
-	} else {
-		b.currentModel = readCodexModelAtOffset(path, offset)
-	}
+	b.currentModel = readCodexModelAtOffset(path, offset)
 	var fallbackErr error
 
 	consumed, err := readJSONLFrom(
