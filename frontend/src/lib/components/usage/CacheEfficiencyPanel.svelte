@@ -1,5 +1,6 @@
 <script lang="ts">
   import { usage } from "../../stores/usage.svelte.js";
+  import { savingsState } from "../../utils/usageSavings.js";
 
   function fmtTokens(v: number): string {
     if (v >= 1_000_000_000) {
@@ -68,6 +69,7 @@
   const savings = $derived(
     usage.summary?.cacheStats?.savingsVsUncached ?? 0,
   );
+  const savingsLabel = $derived(savingsState(savings));
 </script>
 
 <div class="cache-panel">
@@ -96,9 +98,13 @@
       {/each}
     </div>
 
-    {#if savings > 0}
-      <div class="savings-callout">
+    {#if savingsLabel === "saved"}
+      <div class="savings-callout saved">
         {fmtCost(savings)} saved vs uncached
+      </div>
+    {:else if savingsLabel === "costlier"}
+      <div class="savings-callout costlier">
+        {fmtCost(Math.abs(savings))} more than uncached
       </div>
     {/if}
   {/if}
@@ -164,12 +170,22 @@
     margin-top: 12px;
     padding: 6px 10px;
     border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .savings-callout.saved {
     background: color-mix(
       in srgb, var(--accent-green) 10%, transparent
     );
     color: var(--accent-green);
-    font-size: 11px;
-    font-weight: 500;
+  }
+
+  .savings-callout.costlier {
+    background: color-mix(
+      in srgb, var(--accent-amber) 12%, transparent
+    );
+    color: var(--accent-amber);
   }
 
   .loading, .empty {
