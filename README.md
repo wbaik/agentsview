@@ -75,6 +75,8 @@ Features:
 | ![Search](https://agentsview.io/screenshots/search-results.png) | ![Heatmap](https://agentsview.io/screenshots/heatmap.png) |
 
 - **Full-text search** across all message content (FTS5)
+- **Token usage and cost dashboard** -- per-session and per-model cost
+  breakdowns, daily spend charts, all in the web UI
 - **Analytics dashboard** -- activity heatmaps, tool usage, velocity metrics,
   project breakdowns
 - **Live updates** via SSE as active sessions receive new messages
