@@ -294,7 +294,7 @@ func EnsureSchema(
 	return nil
 }
 
-const isAutomatedBackfillMetadataKey = "is_automated_backfill_v1"
+const isAutomatedBackfillMetadataKey = "is_automated_backfill_v2"
 
 // backfillIsAutomatedPG recomputes is_automated for all PG
 // sessions, correcting both false negatives (new patterns) and

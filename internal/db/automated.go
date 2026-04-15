@@ -19,6 +19,7 @@ var automatedPrefixes = []string{
 	"You are analyzing AI agent sessions.",
 	"## Analysis Request",
 	"# Fix Request",
+	"You are a helpful assistant working on a software project.",
 }
 
 // automatedSubstrings are patterns matched anywhere in the

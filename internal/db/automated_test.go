@@ -104,6 +104,13 @@ func TestIsAutomatedSession(t *testing.T) {
 			true,
 		},
 
+		// Helpful assistant analysis
+		{
+			"HelpfulAssistantAnalysis",
+			"You are a helpful assistant working on a software project. Analyze the following sessions.",
+			true,
+		},
+
 		// Catch-all substring
 		{
 			"RoborevSubstringInMiddle",
