@@ -10,9 +10,18 @@ RUN apk add --no-cache openssh-server tar && \
     chmod 600 /home/testuser/.ssh/authorized_keys && \
     chown -R testuser:testuser /home/testuser/.ssh && \
     cp /home/testuser/.ssh/id_test /tmp/test_ssh_key && \
-    chmod 644 /tmp/test_ssh_key && \
-    echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
-    echo "AuthorizedKeysFile .ssh/authorized_keys" >> /etc/ssh/sshd_config
+    chmod 644 /tmp/test_ssh_key
+# Configure sshd: enable pubkey auth explicitly and allow
+# login for testuser. Write a fresh config to avoid any
+# Alpine defaults that might interfere.
+RUN printf '%s\n' \
+    "Port 22" \
+    "PubkeyAuthentication yes" \
+    "AuthorizedKeysFile .ssh/authorized_keys" \
+    "PasswordAuthentication no" \
+    "PermitRootLogin no" \
+    "Subsystem sftp /usr/lib/ssh/sftp-server" \
+    > /etc/ssh/sshd_config
 
 # Claude session fixture
 RUN mkdir -p /home/testuser/.claude/projects/test-project/aaaaaaaa-1111-2222-3333-444444444444
