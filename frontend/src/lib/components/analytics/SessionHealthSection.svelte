@@ -26,7 +26,7 @@
       </span>
     </div>
 
-    <div class="summary-cards">
+    <div class="health-summary-cards">
       <div class="card">
         <span class="card-label">Avg Score</span>
         <span class="card-value">
@@ -211,7 +211,7 @@
     font-size: 12px;
     color: var(--text-muted);
   }
-  .summary-cards {
+  .health-summary-cards {
     display: grid;
     grid-template-columns: repeat(5, 1fr);
     gap: 12px;
@@ -284,7 +284,7 @@
     border-bottom: 1px solid var(--bg-inset);
   }
   @media (max-width: 767px) {
-    .summary-cards {
+    .health-summary-cards {
       grid-template-columns: repeat(2, 1fr);
     }
     .chart-grid {
