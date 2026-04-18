@@ -157,24 +157,80 @@ func projectFromWorktreeLayout(path string) string {
 	return ""
 }
 
-// isForeignOSPath reports whether cwd uses a path convention that
-// cannot correspond to a local filesystem location on the running
-// OS. Walking such a path with os.Stat is both futile and, on
-// macOS, actively harmful: /home is an autofs mount point whose
-// map resolver (/usr/libexec/od_user_homes) enumerates every user
-// record through opendirectoryd, so bulk probes from remote-sync
-// runs peg opendirectoryd and automountd at many hundred percent
-// CPU. Windows-style paths on POSIX were the original case; the
-// cross-OS home-prefix cases cover the autofs storm symmetrically.
+// autoMasterPath is indirected so tests can substitute a fixture.
+var autoMasterPath = "/etc/auto_master"
+
+// autofsPrefixes holds path prefixes that the local autofs config
+// manages, each with a trailing separator so strings.HasPrefix
+// gives component-boundary matches. Populated at package init on
+// darwin; other platforms leave it empty.
+//
+// Why we care: os.Stat into an autofs-managed prefix triggers
+// automountd. For the default /home entry macOS resolves the map
+// via /usr/libexec/od_user_homes, which asks opendirectoryd to
+// enumerate every user record. Bulk remote-sync runs whose
+// session cwds all share a /home/<user>/... prefix therefore peg
+// opendirectoryd and automountd at hundreds of percent CPU. The
+// git-root walker skips paths that fall inside these prefixes.
+//
+// Discovering the prefix set from auto_master (rather than
+// hardcoding /home) means a host with a real filesystem at /home
+// — and no autofs entry — still gets full git-root resolution.
+var autofsPrefixes = detectAutofsPrefixes()
+
+// detectAutofsPrefixes reads auto_master and returns the mount
+// points declared as autofs prefixes. Returns nil on non-darwin
+// hosts or when the file is absent/unreadable.
+func detectAutofsPrefixes() []string {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	data, err := os.ReadFile(autoMasterPath)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for line := range strings.SplitSeq(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		mount := fields[0]
+		// Skip +include directives (e.g. +auto_master) and the
+		// direct-map marker /- — neither corresponds to a prefix
+		// we could match with strings.HasPrefix.
+		if !strings.HasPrefix(mount, "/") || mount == "/-" {
+			continue
+		}
+		out = append(out, strings.TrimRight(mount, "/")+"/")
+	}
+	return out
+}
+
+// isForeignOSPath reports whether cwd should bypass the local
+// git-root walk. Two cases qualify:
+//
+//   - Windows-convention paths on POSIX hosts (drive letters, UNC
+//     prefixes) cannot exist as real filesystem locations.
+//   - Paths under a locally-configured autofs prefix: walking them
+//     triggers automountd, which on macOS cascades into
+//     opendirectoryd enumeration of every user record.
+//
+// The autofs set is discovered from /etc/auto_master, so hosts
+// that have replaced the default /home autofs entry with a real
+// mount are not misclassified.
 func isForeignOSPath(cwd string, winPath bool) bool {
 	if winPath {
 		return runtime.GOOS != "windows"
 	}
-	switch runtime.GOOS {
-	case "darwin":
-		return strings.HasPrefix(cwd, "/home/")
-	case "linux":
-		return strings.HasPrefix(cwd, "/Users/")
+	for _, prefix := range autofsPrefixes {
+		if strings.HasPrefix(cwd, prefix) {
+			return true
+		}
 	}
 	return false
 }
