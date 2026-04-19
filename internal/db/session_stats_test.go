@@ -596,10 +596,11 @@ func TestGetSessionStats_Distributions(t *testing.T) {
 			stats.Distributions.PeakContextTokens.NullCount)
 	}
 
-	// tools_per_turn: a=0/1=0, b=1/1=1, c=6/3=2, d=15/10=1.5, e=30/30=1.
+	// tools_per_turn: a skipped (assistantTurns==0),
+	// b=1/1=1, c=6/3=2, d=15/10=1.5, e=30/30=1.
 	// toolsPerTurnEdges = [0,1,2,4,7,11,+Inf].
 	gotTPT := stats.Distributions.ToolsPerTurn.ScopeAll.Buckets
-	wantTPT := []int{1, 3, 1, 0, 0, 0}
+	wantTPT := []int{0, 3, 1, 0, 0, 0}
 	if len(gotTPT) != len(wantTPT) {
 		t.Fatalf("tools_per_turn scope_all: got %d buckets, want %d",
 			len(gotTPT), len(wantTPT))
@@ -616,8 +617,8 @@ func TestGetSessionStats_Distributions_NullPeakContext(t *testing.T) {
 	d := testDB(t)
 	ctx := context.Background()
 
-	// One session lacks peak-context data; it must land in NullCount
-	// rather than any peak_context bucket (including bucket 0).
+	// One Claude session lacks peak-context data; it must land in
+	// NullCount rather than any peak_context bucket (including bucket 0).
 	insertSessionFixture(t, d, sessionFixture{
 		id: "np1", agent: "claude", userMsgs: 5,
 		startedAt:   hoursAgo(5),
@@ -631,6 +632,16 @@ func TestGetSessionStats_Distributions_NullPeakContext(t *testing.T) {
 		peakContext:    20_000,
 		hasPeakContext: true,
 	})
+	// Non-Claude session without peak-context must NOT increment
+	// NullCount: peak_context is Claude-only, so codex/cursor rows are
+	// outside the metric entirely. Guards against regressions that
+	// remove the r.agent == "claude" gate on the null branch.
+	insertSessionFixture(t, d, sessionFixture{
+		id: "cx1", agent: "codex", userMsgs: 5,
+		startedAt:   hoursAgo(5),
+		durationMin: 3.0,
+		// hasPeakContext left at false
+	})
 
 	stats, err := d.GetSessionStats(ctx, StatsFilter{Since: "28d"})
 	if err != nil {
@@ -639,7 +650,8 @@ func TestGetSessionStats_Distributions_NullPeakContext(t *testing.T) {
 
 	pc := stats.Distributions.PeakContextTokens
 	if pc.NullCount != 1 {
-		t.Errorf("null_count: got %d want 1", pc.NullCount)
+		t.Errorf("null_count: got %d want 1 "+
+			"(only np1; codex cx1 must not count)", pc.NullCount)
 	}
 	total := 0
 	for _, b := range pc.ScopeAll.Buckets {
@@ -647,6 +659,6 @@ func TestGetSessionStats_Distributions_NullPeakContext(t *testing.T) {
 	}
 	if total != 1 {
 		t.Errorf("scope_all bucket total: got %d want 1 "+
-			"(the one session with hasPeakContext=true)", total)
+			"(the one Claude session with hasPeakContext=true)", total)
 	}
 }

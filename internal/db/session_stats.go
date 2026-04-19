@@ -444,9 +444,17 @@ func (a *scopedAccumulator) finalize() ScopedDistribution {
 //   - ScopeHuman requires userMessageCount >= 2 (mirrors the archetype
 //     boundary between automation and quick).
 //
+// Per-metric filters excluded from both scopes:
+//
+//   - DurationMinutes: only rows with endedAt set (r.endedAt.Valid);
+//     sessions without an end timestamp have no meaningful duration.
+//   - ToolsPerTurn: only rows with assistantTurns > 0; a zero-turn
+//     session has no meaningful turn rate and would otherwise bias
+//     bucket 0 toward the zero ratio.
+//
 // PeakContextTokens is Claude-only: rows from other agents and rows
-// without hasPeakContext data are excluded from every bucket and, for
-// the latter, tallied separately in NullCount.
+// without hasPeakContext data are excluded from every bucket; the
+// Claude-specific null rows are tallied separately in NullCount.
 func computeDistributions(s *SessionStats, rows []sessionStatsRow) {
 	durAll := newAccumulator(durationMinutesEdges)
 	durHuman := newAccumulator(durationMinutesEdges)
@@ -483,10 +491,12 @@ func computeDistributions(s *SessionStats, rows []sessionStatsRow) {
 				pcNull++
 			}
 		}
-		tpt := float64(r.totalToolCalls) / float64(max(r.assistantTurns, 1))
-		tptAll.add(tpt)
-		if human {
-			tptHuman.add(tpt)
+		if r.assistantTurns > 0 {
+			tpt := float64(r.totalToolCalls) / float64(r.assistantTurns)
+			tptAll.add(tpt)
+			if human {
+				tptHuman.add(tpt)
+			}
 		}
 	}
 
