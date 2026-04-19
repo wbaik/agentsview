@@ -154,6 +154,13 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session
     ON tool_calls(session_id);
+-- idx_tool_calls_message backs the ON DELETE CASCADE from
+-- messages(id). Without it SQLite full-scans tool_calls per
+-- deleted message row, which makes ReplaceSessionMessages
+-- O(messages * tool_calls) and stalls sync once tool_calls
+-- grows large.
+CREATE INDEX IF NOT EXISTS idx_tool_calls_message
+    ON tool_calls(message_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_category
     ON tool_calls(category);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_skill
@@ -225,6 +232,12 @@ CREATE TABLE IF NOT EXISTS pinned_messages (
 
 CREATE INDEX IF NOT EXISTS idx_pinned_session
     ON pinned_messages(session_id);
+-- idx_pinned_message backs the ON DELETE CASCADE from messages(id).
+-- The UNIQUE(session_id, message_id) constraint creates an index
+-- ordered (session_id, message_id), which the FK lookup on
+-- message_id alone cannot use (leftmost-prefix rule).
+CREATE INDEX IF NOT EXISTS idx_pinned_message
+    ON pinned_messages(message_id);
 CREATE INDEX IF NOT EXISTS idx_pinned_created
     ON pinned_messages(created_at DESC);
 
