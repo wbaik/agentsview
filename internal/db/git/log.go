@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -38,7 +39,7 @@ func AggregateLog(
 		"--format=%H",
 		"--since="+since,
 		"--until="+until,
-		"--author="+authorEmail,
+		"--author="+authorEmailPattern(authorEmail),
 	)
 	cmd.Dir = repo
 	var stderr bytes.Buffer
@@ -133,6 +134,17 @@ func parseNumstatCount(s string) (int, error) {
 		return 0, nil
 	}
 	return strconv.Atoi(s)
+}
+
+// authorEmailPattern returns a regex that matches authorEmail literally.
+// `git log --author` interprets its value as a regex, so emails containing
+// metacharacters like "." or "+" (e.g. "first.last+dev@example.com") match
+// many unrelated authors. Anchoring an escaped pattern with `<...>` keeps
+// the match scoped to the author header's "<email>" portion — git formats
+// the author line as "Name <email>", so the angle brackets bound the email
+// without needing a full ^...$ on the whole header.
+func authorEmailPattern(email string) string {
+	return "<" + regexp.QuoteMeta(email) + ">"
 }
 
 // AuthorEmail returns `git config user.email` run from inside the repo,

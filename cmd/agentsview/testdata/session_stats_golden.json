@@ -17,9 +17,7 @@
       "cursor": 1
     },
     "by_tokens": {
-      "claude": 151420,
-      "codex": 0,
-      "cursor": 0
+      "claude": 151420
     },
     "primary": "claude"
   },
@@ -67,14 +65,14 @@
           "count": 0,
           "edge": [
             0.95,
-            1.000001
+            1
           ]
         }
       ],
       "overall": 0.5793498147018812
     },
     "claude_only": true,
-    "dollars_saved_vs_uncached": 1.839855,
+    "dollars_saved_vs_uncached": 2.373315,
     "dollars_spent": 6.751545
   },
   "distributions": {

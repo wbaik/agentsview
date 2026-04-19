@@ -409,19 +409,19 @@ type goldenSessionSpec struct {
 var goldenFixtureSessions = []goldenSessionSpec{
 	{
 		id: "c-auto-01", project: "proj-alpha", agent: "claude",
-		model: "claude-sonnet-4-20250514",
+		model:     "claude-sonnet-4-20250514",
 		startedAt: "2026-04-05T10:00:00Z", durationMin: 5,
 		userMsgs: 1, outcome: "completed", healthGrade: "A",
 	},
 	{
 		id: "c-auto-02", project: "proj-alpha", agent: "claude",
-		model: "claude-sonnet-4-20250514",
+		model:     "claude-sonnet-4-20250514",
 		startedAt: "2026-04-05T11:00:00Z", durationMin: 4,
 		userMsgs: 1, outcome: "completed", healthGrade: "A",
 	},
 	{
 		id: "c-quick-01", project: "proj-alpha", agent: "claude",
-		model: "claude-sonnet-4-20250514",
+		model:     "claude-sonnet-4-20250514",
 		startedAt: "2026-04-06T10:00:00Z", durationMin: 15,
 		userMsgs: 3, peakContext: 20000,
 		outcome: "completed", healthGrade: "A",
@@ -429,14 +429,14 @@ var goldenFixtureSessions = []goldenSessionSpec{
 	},
 	{
 		id: "c-quick-02", project: "proj-beta", agent: "claude",
-		model: "claude-opus-4-20250514",
+		model:     "claude-opus-4-20250514",
 		startedAt: "2026-04-07T10:00:00Z", durationMin: 20,
 		userMsgs: 3, outcome: "completed", healthGrade: "B",
 		toolCategory: "shell", toolName: "Bash", toolCount: 3,
 	},
 	{
 		id: "c-std-01", project: "proj-beta", agent: "claude",
-		model: "claude-sonnet-4-20250514",
+		model:     "claude-sonnet-4-20250514",
 		startedAt: "2026-04-08T10:00:00Z", durationMin: 45,
 		userMsgs: 10, peakContext: 55000,
 		outcome: "completed", healthGrade: "B",
@@ -445,7 +445,7 @@ var goldenFixtureSessions = []goldenSessionSpec{
 	},
 	{
 		id: "c-deep-01", project: "proj-beta", agent: "claude",
-		model: "claude-opus-4-20250514",
+		model:     "claude-opus-4-20250514",
 		startedAt: "2026-04-09T10:00:00Z", durationMin: 120,
 		userMsgs: 30, peakContext: 95000,
 		outcome: "completed", healthGrade: "A",
@@ -454,7 +454,7 @@ var goldenFixtureSessions = []goldenSessionSpec{
 	},
 	{
 		id: "c-deep-02", project: "proj-gamma", agent: "claude",
-		model: "claude-opus-4-20250514",
+		model:     "claude-opus-4-20250514",
 		startedAt: "2026-04-10T10:00:00Z", durationMin: 150,
 		userMsgs: 25, peakContext: 75000,
 		outcome: "errored", healthGrade: "C",
@@ -462,7 +462,7 @@ var goldenFixtureSessions = []goldenSessionSpec{
 	},
 	{
 		id: "c-marathon-01", project: "proj-gamma", agent: "claude",
-		model: "claude-sonnet-4-20250514",
+		model:     "claude-sonnet-4-20250514",
 		startedAt: "2026-04-11T10:00:00Z", durationMin: 240,
 		userMsgs: 80, peakContext: 130000,
 		outcome: "completed", healthGrade: "A",
@@ -481,7 +481,7 @@ var goldenFixtureSessions = []goldenSessionSpec{
 	},
 	{
 		id: "c-skill-01", project: "proj-alpha", agent: "claude",
-		model: "claude-sonnet-4-20250514",
+		model:     "claude-sonnet-4-20250514",
 		startedAt: "2026-04-12T10:00:00Z", durationMin: 25,
 		userMsgs: 8, outcome: "completed", healthGrade: "B",
 		toolCategory: "other", toolName: "Skill", toolCount: 2,

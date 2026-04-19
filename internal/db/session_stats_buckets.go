@@ -16,7 +16,13 @@ var userMessagesEdgesHuman = []float64{2, 6, 16, 31, 51, math.Inf(1)}
 
 var peakContextEdges = []float64{0, 10_000, 50_000, 100_000, 150_000, 200_000, math.Inf(1)}
 var toolsPerTurnEdges = []float64{0, 1, 2, 4, 7, 11, math.Inf(1)}
-var cacheHitRatioEdges = []float64{0, 0.25, 0.5, 0.75, 0.95, 1.000001} // inclusive of 1.0
+
+// cacheHitRatioEdges uses 1.000001 as an internal sentinel so values of
+// exactly 1.0 fall into the last bucket under assignBucket's half-open
+// rule. This sentinel must NOT be exposed via the v1 JSON schema; use
+// buildCacheHitRatioBuckets to materialize buckets with the public
+// upper edge clamped back to 1.0.
+var cacheHitRatioEdges = []float64{0, 0.25, 0.5, 0.75, 0.95, 1.000001}
 
 // assignBucket returns the index i such that edges[i] <= v < edges[i+1],
 // or -1 if v < edges[0] or v >= edges[len-1] (shouldn't happen given Inf upper).
@@ -47,4 +53,17 @@ func buildEmptyBuckets(edges []float64) []DistributionBucketV1 {
 		})
 	}
 	return out
+}
+
+// buildCacheHitRatioBuckets returns the cache-hit-ratio buckets with the
+// internal 1.000001 sentinel rewritten to 1.0 for the JSON schema. The
+// sentinel exists only so assignBucket can place ratio == 1.0 into the
+// last bucket; the JSON contract advertises a clean [0.95, 1.0] band.
+func buildCacheHitRatioBuckets() []DistributionBucketV1 {
+	buckets := buildEmptyBuckets(cacheHitRatioEdges)
+	if n := len(buckets); n > 0 && buckets[n-1].Edge[1] != nil {
+		one := 1.0
+		buckets[n-1].Edge[1] = &one
+	}
+	return buckets
 }

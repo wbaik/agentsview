@@ -3,21 +3,26 @@
 package git
 
 import (
+	"bytes"
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
-// DiscoverRepos walks up from each cwd looking for a `.git` directory and
-// returns a deduplicated list of repo toplevels that exist.
+// DiscoverRepos resolves each cwd to its enclosing git repository toplevel and
+// returns the deduplicated list. Cwds with no enclosing repo (or whose
+// resolution fails) are silently dropped. Order follows first-seen order in
+// the input.
 //
-// Cwds with no enclosing repo are silently dropped. Order in the result
-// follows first-seen order in the input.
-//
-// Limitation: only directories named `.git` are recognized. Git worktrees and
-// submodules represent `.git` as a FILE containing `gitdir: <path>`; such cwds
-// are not treated as repo roots by this function. Callers that need worktree
-// support should resolve the gitdir themselves or shell out to
-// `git rev-parse --show-toplevel`.
+// Resolution prefers `git rev-parse --show-toplevel`, which handles standard
+// `.git` directories, linked worktrees (`.git` is a file pointing at the
+// shared gitdir), and submodules. When the cwd no longer exists on disk, the
+// helper falls back to walking upward from the nearest existing ancestor and
+// invoking `git rev-parse` from there — that mirrors how the parser package
+// recovers repo roots for archived sessions whose cwd has been deleted.
 func DiscoverRepos(cwds []string) []string {
 	seen := map[string]struct{}{}
 	out := []string{}
@@ -35,13 +40,33 @@ func DiscoverRepos(cwds []string) []string {
 	return out
 }
 
-// findRepoRoot walks upward from start until it finds a directory containing a
-// `.git` subdirectory, or returns "" if the filesystem root is reached.
+// findRepoRoot returns the absolute repo toplevel for start, or "" when no
+// enclosing repo can be resolved.
 func findRepoRoot(start string) string {
-	dir := start
+	if start == "" {
+		return ""
+	}
+	dir := existingAncestor(start)
+	if dir == "" {
+		return ""
+	}
+	return gitToplevel(dir)
+}
+
+// existingAncestor returns the closest ancestor of path that exists on disk
+// and is a directory. If path itself is an existing directory, it is
+// returned. Returns "" when no ancestor exists (only possible on torn
+// filesystems or invalid roots).
+func existingAncestor(path string) string {
+	dir := path
 	for {
-		if info, err := os.Stat(filepath.Join(dir, ".git")); err == nil && info.IsDir() {
-			return dir
+		info, err := os.Stat(dir)
+		if err == nil {
+			if info.IsDir() {
+				return dir
+			}
+			dir = filepath.Dir(dir)
+			continue
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -49,4 +74,23 @@ func findRepoRoot(start string) string {
 		}
 		dir = parent
 	}
+}
+
+// gitToplevel runs `git rev-parse --show-toplevel` from dir and returns the
+// trimmed result, or "" if git fails or prints nothing. A 5s timeout guards
+// against hung git invocations on broken repos.
+func gitToplevel(dir string) string {
+	ctx, cancel := context.WithTimeout(
+		context.Background(), 5*time.Second,
+	)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
+	cmd.Dir = dir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

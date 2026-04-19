@@ -21,10 +21,12 @@ type PRResult struct {
 // AggregatePRs queries the `gh` CLI twice per repo — once for PRs created in
 // the window, once for PRs merged in the window — and returns the counts.
 //
-// since/until are passed directly into gh's `--search=created:>=SINCE..UNTIL`
-// (and `merged:...`) expressions, so they must be in a format gh accepts
-// (YYYY-MM-DD or full RFC3339). The repo argument sets the working directory
-// for `gh` so it picks up the correct remote.
+// since/until are formatted into gh's `--search=created:SINCE..UNTIL` (and
+// `merged:...`) range expressions. GitHub search treats `>=A..B` as malformed
+// — the colon-and-double-dot range syntax already implies an inclusive
+// closed window, so the bounds must be plain dates or RFC3339 timestamps.
+// The repo argument sets the working directory for `gh` so it picks up the
+// correct remote.
 //
 // When ghToken is empty this returns (nil, nil): the caller distinguishes
 // "unknown — gh not configured" from a legitimate zero count. GH_TOKEN is
@@ -43,7 +45,7 @@ func AggregatePRs(
 		"pr", "list",
 		"--state=all",
 		"--author=@me",
-		"--search=created:>=" + window,
+		"--search=created:" + window,
 		"--json", "state",
 		"--limit", "500",
 	})
@@ -54,7 +56,7 @@ func AggregatePRs(
 		"pr", "list",
 		"--state=merged",
 		"--author=@me",
-		"--search=merged:>=" + window,
+		"--search=merged:" + window,
 		"--json", "state",
 		"--limit", "500",
 	})

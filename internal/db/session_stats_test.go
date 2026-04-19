@@ -7,10 +7,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+// itoa is a thin alias for strconv.Itoa kept short so seedModelMessages'
+// inline JSON construction stays readable.
+func itoa(n int) string { return strconv.Itoa(n) }
 
 // sessionFixture is a compact description of a seeded session used by
 // session-stats tests. Fields mirror the subset of sessions-table
@@ -25,12 +30,13 @@ type sessionFixture struct {
 	endedAt      string // RFC3339 or ""
 	// durationMin, when > 0 and endedAt is empty, derives endedAt as
 	// startedAt + durationMin minutes. Ignored if endedAt is set.
-	durationMin      float64
-	peakContext      int
-	hasPeakContext   bool
-	totalOutputTok   int
-	isAutomated      bool
-	relationshipType string
+	durationMin        float64
+	peakContext        int
+	hasPeakContext     bool
+	totalOutputTok     int
+	hasTotalOutputToks bool
+	isAutomated        bool
+	relationshipType   string
 	// totalToolCalls seeds that many rows in the tool_calls table for
 	// this session, each attached to a synthetic assistant message.
 	totalToolCalls int
@@ -98,6 +104,12 @@ func insertSessionFixture(t *testing.T, d *DB, f sessionFixture) {
 		s.PeakContextTokens = f.peakContext
 		s.HasPeakContextTokens = f.hasPeakContext
 		s.TotalOutputTokens = f.totalOutputTok
+		// Flip has_total_output_tokens whenever the fixture supplies a
+		// non-zero token count; tests that explicitly want to leave the
+		// flag false can override via hasTotalOutputToks.
+		if f.hasTotalOutputToks || f.totalOutputTok > 0 {
+			s.HasTotalOutputTokens = true
+		}
 		s.IsAutomated = f.isAutomated
 		s.RelationshipType = f.relationshipType
 		s.Cwd = f.cwd
@@ -218,6 +230,13 @@ func seedModelMessages(
 		m.Model = p.model
 		m.OutputTokens = p.tokens
 		m.HasOutputTokens = true
+		// model_mix's eligibility filter (mirrors
+		// usageMessageEligibility) requires token_usage != ''. Stamp a
+		// minimal JSON blob so these fixtures qualify; the contents
+		// don't matter to model_mix, which sums output_tokens.
+		m.TokenUsage = json.RawMessage(
+			`{"output_tokens":` + itoa(p.tokens) + `}`,
+		)
 		msgs = append(msgs, m)
 	}
 	if err := d.InsertMessages(msgs); err != nil {
@@ -1475,23 +1494,22 @@ func TestGetSessionStats_CacheEconomics(t *testing.T) {
 			ce.DollarsSpent, wantSpent)
 	}
 
-	// cost_without_cache reprices (input + cache_read) at input rate
-	// and zeroes cache_creation, keeping output unchanged.
-	//   ce1 opus = (15*(1000+9000) + 75*500)/1e6
-	//           = (150000 + 37500)/1e6 = 0.1875
-	//   ce2 sonn = (3*(500+3000) + 15*200)/1e6
-	//           = (10500 + 3000)/1e6 = 0.0135
-	//   ce3 opus = (15*(100+100) + 75*50)/1e6
+	// cost_without_cache reprices input + cache_creation + cache_read
+	// at the input rate, keeping output unchanged. cache_creation
+	// tokens would still have been sent as ordinary input in the
+	// counterfactual, so they are not zeroed (matches usage.go and
+	// frontend/src/lib/utils/usageSavings.ts).
+	//   ce1 opus = (15*(1000+100+9000) + 75*500)/1e6
+	//           = (15*10100 + 37500)/1e6 = 0.189
+	//   ce2 sonn = (3*(500+50+3000) + 15*200)/1e6
+	//           = (3*3550 + 3000)/1e6 = 0.01365
+	//   ce3 opus = (15*(100+0+100) + 75*50)/1e6
 	//           = (3000 + 3750)/1e6 = 0.00675
-	wantWithoutCache := 0.1875 + 0.0135 + 0.00675
+	wantWithoutCache := 0.189 + 0.01365 + 0.00675
 	wantSavings := wantWithoutCache - wantSpent
 	if !floatsClose(ce.DollarsSavedVsUncached, wantSavings, 1e-9) {
 		t.Errorf("DollarsSavedVsUncached: got %v want %v",
 			ce.DollarsSavedVsUncached, wantSavings)
-	}
-	if ce.DollarsSavedVsUncached < 0 {
-		t.Errorf("DollarsSavedVsUncached must be non-negative: got %v",
-			ce.DollarsSavedVsUncached)
 	}
 }
 

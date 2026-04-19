@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+	"github.com/wesm/agentsview/internal/config"
 	"github.com/wesm/agentsview/internal/db"
 	"github.com/wesm/agentsview/internal/service"
 )
@@ -28,7 +29,7 @@ func newSessionStatsCommand() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, cleanup, err := resolveService(cmd)
+			svc, cleanup, err := openStatsService(cmd)
 			if err != nil {
 				return err
 			}
@@ -70,56 +71,118 @@ func newSessionStatsCommand() *cobra.Command {
 		},
 	}
 
-	f := cmd.Flags()
-	f.StringVar(&since, "since", "28d",
-		"Start of window (duration like 28d, or YYYY-MM-DD)")
-	f.StringVar(&until, "until", "",
-		"End of window (YYYY-MM-DD; default: now)")
-	f.StringVar(&agent, "agent", "all",
-		"Filter by agent (claude, codex, cursor, ... or 'all')")
-	f.StringArrayVar(&includeProjects, "include-project", nil,
-		"Restrict to these projects (repeatable)")
-	f.StringArrayVar(&excludeProjects, "exclude-project", nil,
-		"Exclude these projects (repeatable)")
-	f.StringVar(&timezone, "timezone", "",
-		"Timezone for temporal (default: local system timezone)")
-	f.StringVar(&ghToken, "gh-token", "",
-		"GitHub token for PR aggregation (falls back to GH_TOKEN/GITHUB_TOKEN env)")
+	registerStatsFlags(cmd,
+		&since, &until, &agent, &timezone, &ghToken,
+		&includeProjects, &excludeProjects,
+	)
 	return cmd
+}
+
+// registerStatsFlags wires the `session stats` flags onto cmd. Split out so
+// the long flag-registration block doesn't pad newSessionStatsCommand past
+// the 100-line cap.
+func registerStatsFlags(
+	cmd *cobra.Command,
+	since, until, agent, timezone, ghToken *string,
+	includeProjects, excludeProjects *[]string,
+) {
+	f := cmd.Flags()
+	f.StringVar(since, "since", "28d",
+		"Start of window (duration like 28d, or YYYY-MM-DD)")
+	f.StringVar(until, "until", "",
+		"End of window (YYYY-MM-DD; default: now)")
+	f.StringVar(agent, "agent", "all",
+		"Filter by agent (claude, codex, cursor, ... or 'all')")
+	f.StringArrayVar(includeProjects, "include-project", nil,
+		"Restrict to these projects (repeatable)")
+	f.StringArrayVar(excludeProjects, "exclude-project", nil,
+		"Exclude these projects (repeatable)")
+	f.StringVar(timezone, "timezone", "",
+		"Timezone for temporal (default: local system timezone)")
+	f.StringVar(ghToken, "gh-token", "",
+		"GitHub token for PR aggregation (falls back to GH_TOKEN/GITHUB_TOKEN env)")
+}
+
+// openStatsService opens a SessionService scoped to the local SQLite
+// archive. session stats deliberately bypasses resolveService (and the
+// HTTP daemon transport) because the daemon does not yet expose a
+// /stats endpoint, and resolveService prefers HTTP when one is running.
+// Reading SQLite directly is also write-safe: GetSessionStats only
+// reads, so a writable daemon owning the database is not disturbed.
+func openStatsService(
+	cmd *cobra.Command,
+) (service.SessionService, func(), error) {
+	cfg, err := config.LoadPFlags(cmd.Flags())
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading config: %w", err)
+	}
+	d, err := db.Open(cfg.DBPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening db: %w", err)
+	}
+	cleanup := func() { d.Close() }
+	// Pass a typed *db.DB so directBackend.Stats has the local handle
+	// it needs; engine is nil because the CLI never syncs.
+	return service.NewDirectBackend(d, nil), cleanup, nil
 }
 
 // printSessionStatsHuman renders a human-readable summary of a
 // SessionStats payload. Sections driven by nil-pointer fields are
 // omitted when absent, and a zero-session window prints a short
 // "no sessions" message instead of rows of zeros.
+//
+// Each helper returns the first write error it encountered so a broken
+// pipe or short write surfaces from the command instead of silently
+// truncating the output. The first error short-circuits rendering.
 func printSessionStatsHuman(w io.Writer, stats *service.SessionStats) error {
-	printHeader(w, stats)
+	ew := &errWriter{w: w}
+	printHeader(ew, stats)
 	if stats.Totals.SessionsAll == 0 {
-		fmt.Fprintln(w, "Totals")
-		fmt.Fprintln(w, "  (no sessions in window)")
-		return nil
+		fmt.Fprintln(ew, "Totals")
+		fmt.Fprintln(ew, "  (no sessions in window)")
+		return ew.err
 	}
-	printTotals(w, stats)
-	printArchetypes(w, stats)
-	printSessionShape(w, stats)
-	printVelocity(w, stats)
-	printToolMix(w, stats)
-	printModelMix(w, stats)
-	printAgentPortfolio(w, stats)
+	printTotals(ew, stats)
+	printArchetypes(ew, stats)
+	printSessionShape(ew, stats)
+	printVelocity(ew, stats)
+	printToolMix(ew, stats)
+	printModelMix(ew, stats)
+	printAgentPortfolio(ew, stats)
 	if stats.CacheEconomics != nil {
-		printCacheEconomics(w, stats.CacheEconomics)
+		printCacheEconomics(ew, stats.CacheEconomics)
 	}
 	if stats.Adoption != nil {
-		printAdoption(w, stats.Adoption)
+		printAdoption(ew, stats.Adoption)
 	}
-	printTemporal(w, stats)
+	printTemporal(ew, stats)
 	if stats.OutcomeStats != nil {
-		printOutcomeStats(w, stats.OutcomeStats)
+		printOutcomeStats(ew, stats.OutcomeStats)
 	}
 	if stats.Outcomes != nil {
-		printOutcomes(w, stats.Outcomes)
+		printOutcomes(ew, stats.Outcomes)
 	}
-	return nil
+	return ew.err
+}
+
+// errWriter wraps an io.Writer and remembers the first write error.
+// Subsequent writes become no-ops so the rest of the formatter can run
+// to completion without re-checking err on every Fprintf, and tabwriter
+// flushes propagate failures the same way.
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (e *errWriter) Write(p []byte) (int, error) {
+	if e.err != nil {
+		return len(p), nil
+	}
+	n, err := e.w.Write(p)
+	if err != nil {
+		e.err = err
+	}
+	return n, err
 }
 
 func printHeader(w io.Writer, s *service.SessionStats) {

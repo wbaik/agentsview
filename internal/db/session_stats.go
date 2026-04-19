@@ -94,7 +94,7 @@ func (db *DB) GetSessionStats(
 	}
 
 	if err := db.computeTemporal(
-		ctx, stats, f, sessionIDs,
+		ctx, stats, f, from, to, sessionIDs,
 	); err != nil {
 		return nil, fmt.Errorf("computing temporal: %w", err)
 	}
@@ -176,8 +176,12 @@ func (db *DB) accumulateToolMix(
 // stats.ModelMix. Token contribution is messages.output_tokens summed
 // per model — the per-message cost column, matching the spec's
 // "model_mix.by_tokens reflects total output tokens per model".
-// Messages with empty model or zero output_tokens are ignored so
-// untagged / pre-token-accounting rows never distort the distribution.
+//
+// Eligibility mirrors usageMessageEligibility (internal/db/usage.go):
+// rows without parsed token_usage and rows tagged as "<synthetic>" are
+// excluded so model_mix never disagrees with the dollar/usage views.
+// Messages with zero output_tokens are also dropped since they cannot
+// move the by_tokens distribution.
 func (db *DB) accumulateModelMix(
 	ctx context.Context, stats *SessionStats, sessionIDs []string,
 ) error {
@@ -185,7 +189,9 @@ func (db *DB) accumulateModelMix(
 	q := `SELECT model, COALESCE(SUM(output_tokens), 0)
 		FROM messages
 		WHERE session_id IN ` + ph + `
+			AND token_usage != ''
 			AND model != ''
+			AND model != '<synthetic>'
 		GROUP BY model`
 	rows, err := db.getReader().QueryContext(ctx, q, args...)
 	if err != nil {
@@ -336,18 +342,19 @@ func parseDurationShort(s string) (time.Duration, bool) {
 // later tasks extend the struct (and loadSessionsInWindow's SELECT)
 // in place rather than duplicating the scan.
 type sessionStatsRow struct {
-	id                string
-	agent             string
-	project           string
-	startedAt         time.Time
-	endedAt           sql.NullTime
-	messageCount      int
-	userMessageCount  int
-	totalOutputTokens int64
-	peakContextTokens int64
-	hasPeakContext    bool
-	totalToolCalls    int
-	assistantTurns    int
+	id                   string
+	agent                string
+	project              string
+	startedAt            time.Time
+	endedAt              sql.NullTime
+	messageCount         int
+	userMessageCount     int
+	totalOutputTokens    int64
+	hasTotalOutputTokens bool
+	peakContextTokens    int64
+	hasPeakContext       bool
+	totalToolCalls       int
+	assistantTurns       int
 	// Outcome-section fields. Populated from the sessions table via
 	// loadSessionsInWindow; consumed by computeOutcomes. Empty strings
 	// for outcome/healthGrade denote "no signal recorded yet".
@@ -369,14 +376,16 @@ type sessionStatsRow struct {
 func (db *DB) loadSessionsInWindow(
 	ctx context.Context, f StatsFilter, from, to time.Time,
 ) ([]sessionStatsRow, error) {
+	// Use the same COALESCE(NULLIF(started_at, ''), created_at)
+	// expression as the rest of the analytics code so sessions whose
+	// started_at is missing (parser couldn't infer a start time) are
+	// still attributed to the window via their created_at fallback.
 	preds := []string{
 		"message_count > 0",
 		"relationship_type NOT IN ('subagent', 'fork')",
 		"deleted_at IS NULL",
-		"started_at IS NOT NULL",
-		"started_at != ''",
-		"started_at >= ?",
-		"started_at < ?",
+		"COALESCE(NULLIF(started_at, ''), created_at) >= ?",
+		"COALESCE(NULLIF(started_at, ''), created_at) < ?",
 	}
 	args := []any{
 		from.UTC().Format(time.RFC3339Nano),
@@ -415,14 +424,25 @@ func (db *DB) loadSessionsInWindow(
 	// merge step. Correlated subqueries are cheap here because
 	// idx_tool_calls_session and idx_messages_session_role already
 	// narrow the scan to the session's rows.
-	query := `SELECT s.id, s.agent, s.project, s.started_at, s.ended_at,
+	// Project the started_at the rest of the pipeline reads (with
+	// the created_at fallback baked in) so downstream code never has
+	// to revisit the COALESCE. assistant_turns excludes system rows
+	// (Claude compact-boundary summaries, etc.) so they don't inflate
+	// the denominator of the tools-per-turn distribution.
+	// has_total_output_tokens is projected so agent_portfolio's
+	// by_tokens accumulator can guard against zeroed-out token rows.
+	query := `SELECT s.id, s.agent, s.project,
+		COALESCE(NULLIF(s.started_at, ''), s.created_at) AS effective_started_at,
+		s.ended_at,
 		s.message_count, s.user_message_count,
-		s.total_output_tokens, s.peak_context_tokens,
-		s.has_peak_context_tokens,
+		s.total_output_tokens, s.has_total_output_tokens,
+		s.peak_context_tokens, s.has_peak_context_tokens,
 		COALESCE((SELECT COUNT(*) FROM tool_calls tc
 			WHERE tc.session_id = s.id), 0) AS total_tool_calls,
 		COALESCE((SELECT COUNT(*) FROM messages m
-			WHERE m.session_id = s.id AND m.role = 'assistant'),
+			WHERE m.session_id = s.id
+				AND m.role = 'assistant'
+				AND m.is_system = 0),
 			0) AS assistant_turns,
 		s.outcome, COALESCE(s.health_grade, ''),
 		s.tool_retry_count, s.compaction_count, s.edit_churn_count,
@@ -442,13 +462,13 @@ func (db *DB) loadSessionsInWindow(
 		var r sessionStatsRow
 		var startedAt string
 		var endedAt sql.NullString
-		var hasPeak int
+		var hasTotalTokens, hasPeak int
 		if err := sqlRows.Scan(
 			&r.id, &r.agent, &r.project,
 			&startedAt, &endedAt,
 			&r.messageCount, &r.userMessageCount,
-			&r.totalOutputTokens, &r.peakContextTokens,
-			&hasPeak,
+			&r.totalOutputTokens, &hasTotalTokens,
+			&r.peakContextTokens, &hasPeak,
 			&r.totalToolCalls, &r.assistantTurns,
 			&r.outcome, &r.healthGrade,
 			&r.toolRetryCount, &r.compactionCount, &r.editChurnCount,
@@ -476,6 +496,7 @@ func (db *DB) loadSessionsInWindow(
 			}
 			r.endedAt = sql.NullTime{Time: et, Valid: true}
 		}
+		r.hasTotalOutputTokens = hasTotalTokens == 1
 		r.hasPeakContext = hasPeak == 1
 		out = append(out, r)
 	}
@@ -560,10 +581,12 @@ func computeTotalsAndArchetypes(
 
 // pickMaxLabel returns the key with the strictly highest count.
 // Ties are broken by iterating priority in order — the earlier
-// priority entry wins.
+// priority entry wins. Returns "" when counts is empty or every
+// candidate count is zero, so empty windows do not fabricate a
+// "primary" label.
 func pickMaxLabel(counts map[string]int, priority []string) string {
 	best := ""
-	bestN := -1
+	bestN := 0
 	for _, k := range priority {
 		if counts[k] > bestN {
 			best = k
@@ -651,9 +674,16 @@ func computeDistributions(s *SessionStats, rows []sessionStatsRow) {
 		human := r.userMessageCount >= 2
 		if r.endedAt.Valid {
 			dur := r.endedAt.Time.Sub(r.startedAt).Minutes()
-			durAll.add(dur)
-			if human {
-				durHuman.add(dur)
+			// Drop clock-skewed / malformed sessions whose ended_at
+			// precedes started_at: negative durations would distort
+			// the mean and have no matching bucket. assignBucket
+			// already drops them from the histogram, so excluding
+			// them here keeps the mean and bucket totals consistent.
+			if dur >= 0 {
+				durAll.add(dur)
+				if human {
+					durHuman.add(dur)
+				}
 			}
 		}
 		umv := float64(r.userMessageCount)
@@ -725,14 +755,29 @@ func safeMean(sum float64, n int) float64 {
 // per-session counts and output tokens into one bucket per agent.
 // Maps are always non-nil so the JSON output keeps stable {} values
 // when the window contains no sessions.
+//
+// Sessions with an empty agent name are skipped to match the rest of
+// the analytics code (sessions.go's "agent != ”" filter on the agents
+// list). They would otherwise emit an empty-string JSON key and bias
+// pickPrimaryAgent's lexicographic tiebreaker toward "".
+//
+// Token totals only include sessions whose has_total_output_tokens
+// flag is set. Without that guard, agents whose token coverage is
+// missing (default 0) would be indistinguishable from agents that
+// truly produced no output tokens.
 func computeAgentPortfolio(s *SessionStats, rows []sessionStatsRow) {
 	bySessions := map[string]int{}
 	byMessages := map[string]int{}
 	byTokens := map[string]int64{}
 	for _, r := range rows {
+		if r.agent == "" {
+			continue
+		}
 		bySessions[r.agent]++
 		byMessages[r.agent] += r.messageCount
-		byTokens[r.agent] += r.totalOutputTokens
+		if r.hasTotalOutputTokens {
+			byTokens[r.agent] += r.totalOutputTokens
+		}
 	}
 	s.AgentPortfolio.BySessions = bySessions
 	s.AgentPortfolio.ByMessages = byMessages
@@ -817,7 +862,7 @@ func (db *DB) computeCacheEconomics(
 	ce := &StatsCacheEconomics{
 		ClaudeOnly: true,
 		CacheHitRatio: CacheHitRatioDistribution{
-			Buckets: buildEmptyBuckets(cacheHitRatioEdges),
+			Buckets: buildCacheHitRatioBuckets(),
 		},
 	}
 	var (
@@ -854,14 +899,13 @@ func (db *DB) computeCacheEconomics(
 			float64(cacheReadSum) / float64(denominatorSum)
 	}
 	ce.DollarsSpent = dollarsSpent
-	savings := dollarsNoCache - dollarsSpent
-	if savings < 0 {
-		// Savings can only go negative via pricing anomalies (e.g.
-		// cache_read rate greater than input rate). Clamp to zero so
-		// downstream rendering never shows "you paid more to cache".
-		savings = 0
-	}
-	ce.DollarsSavedVsUncached = savings
+	// Negative savings are a legitimate outcome for write-heavy
+	// workloads where cache_creation premiums outweigh cache_read
+	// discounts. The existing usage views (internal/db/usage.go,
+	// frontend/src/lib/utils/usageSavings.ts) surface that "costlier
+	// than uncached" state directly, so do not clamp it away here —
+	// hiding it would mask real cache-efficiency regressions.
+	ce.DollarsSavedVsUncached = dollarsNoCache - dollarsSpent
 
 	stats.CacheEconomics = ce
 	return nil
@@ -890,12 +934,19 @@ func (db *DB) accumulateCacheTotals(
 	perSession map[string]*sessionCacheTotals,
 ) error {
 	ph, args := inPlaceholders(sessionIDs)
+	// ORDER BY (session_id, ordinal) so floating-point sums are
+	// reproducible across runs: SQLite is free to return rows in any
+	// physical order otherwise, and (a+b)+c != a+(b+c) in IEEE 754.
+	// The cross-session fold in computeCacheEconomics already sorts
+	// session IDs; the per-message order completes the determinism
+	// chain so golden tests stay byte-stable.
 	q := `SELECT session_id, model, token_usage
 		FROM messages
 		WHERE session_id IN ` + ph + `
 			AND token_usage != ''
 			AND model != ''
-			AND model != '<synthetic>'`
+			AND model != '<synthetic>'
+		ORDER BY session_id, ordinal`
 	sqlRows, err := db.getReader().QueryContext(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("querying cache tokens: %w", err)
@@ -943,10 +994,15 @@ func addMessageToCacheTotals(
 		float64(outputTok)*rates.output +
 		float64(cacheCrTok)*rates.cacheCreation +
 		float64(cacheRdTok)*rates.cacheRead) / 1_000_000
-	// Uncached counterfactual: no cache_creation cost, and
-	// cache_read tokens re-billed at the regular input rate.
+	// Uncached counterfactual: cache_creation tokens would still
+	// have been sent as ordinary input (so they are billed at the
+	// input rate, not dropped), and cache_read tokens are re-billed
+	// at the input rate too. This matches the rest of the codebase
+	// (see internal/db/usage.go and the savings calculation in
+	// frontend/src/lib/utils/usageSavings.ts).
 	totals.dollarsNoCac += (float64(inputTok)*rates.input +
 		float64(outputTok)*rates.output +
+		float64(cacheCrTok)*rates.input +
 		float64(cacheRdTok)*rates.input) / 1_000_000
 }
 
@@ -972,7 +1028,7 @@ func addMessageToCacheTotals(
 // strict tzdata lookup should pass --timezone explicitly.
 func (db *DB) computeTemporal(
 	ctx context.Context, stats *SessionStats, f StatsFilter,
-	sessionIDs []string,
+	from, to time.Time, sessionIDs []string,
 ) error {
 	stats.Temporal.HourlyUTC = []TemporalHourlyUTCEntry{}
 	stats.Temporal.ReporterTimezone = reporterTimezone(f)
@@ -984,7 +1040,9 @@ func (db *DB) computeTemporal(
 	perHour := map[string]*TemporalHourlyUTCEntry{}
 	if err := queryChunked(sessionIDs,
 		func(chunk []string) error {
-			return db.accumulateHourlyUTC(ctx, chunk, perHour)
+			return db.accumulateHourlyUTC(
+				ctx, chunk, from, to, perHour,
+			)
 		}); err != nil {
 		return err
 	}
@@ -1008,6 +1066,12 @@ func (db *DB) computeTemporal(
 // empty strings, and we ignore the resulting row rather than bucketing
 // it into the epoch.
 //
+// from/to bound the message timestamps so that long-running sessions
+// don't drag pre-window or post-window activity into hourly_utc. The
+// session window already restricted us to in-window sessions; this
+// extra predicate keeps a session's stray messages from leaking out
+// of [from, to).
+//
 // Sessions-per-hour is a distinct count: a session sending many
 // messages in one hour counts once, but the same session appearing in
 // two hours contributes to both. queryChunked slices sessionIDs into
@@ -1015,9 +1079,14 @@ func (db *DB) computeTemporal(
 // crosses chunk boundaries.
 func (db *DB) accumulateHourlyUTC(
 	ctx context.Context, sessionIDs []string,
+	from, to time.Time,
 	perHour map[string]*TemporalHourlyUTCEntry,
 ) error {
 	ph, args := inPlaceholders(sessionIDs)
+	args = append(args,
+		from.UTC().Format(time.RFC3339Nano),
+		to.UTC().Format(time.RFC3339Nano),
+	)
 	q := `SELECT
 			strftime('%Y-%m-%dT%H:00:00Z', m.timestamp) AS utc_hour,
 			m.session_id
@@ -1025,7 +1094,9 @@ func (db *DB) accumulateHourlyUTC(
 		WHERE m.session_id IN ` + ph + `
 			AND m.role = 'user'
 			AND m.timestamp IS NOT NULL
-			AND m.timestamp != ''`
+			AND m.timestamp != ''
+			AND m.timestamp >= ?
+			AND m.timestamp < ?`
 	rows, err := db.getReader().QueryContext(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("querying temporal hourly_utc: %w", err)
@@ -1167,8 +1238,12 @@ func computeOutcomes(s *SessionStats, rows []sessionStatsRow) {
 //   - PlanModeRate: distinct Claude sessions with at least one row where
 //     tool_name = "ExitPlanMode", divided by total Claude sessions.
 //     Always in [0, 1].
-//   - SubagentsPerSession: total tool_calls rows with tool_name = "Task",
-//     divided by total Claude sessions. Can exceed 1 (it is a mean).
+//   - SubagentsPerSession: total tool_calls rows with tool_name in
+//     ("Task", "Agent"), divided by total Claude sessions. Can exceed 1
+//     (it is a mean). Both names refer to the same subagent dispatch
+//     primitive — Claude Code records it as "Task" historically and as
+//     "Agent" in newer transcripts; counting both keeps the metric
+//     stable across the rename.
 //   - DistinctSkills: count of distinct non-empty skill_name values
 //     recorded on rows with tool_name = "Skill". The schema already
 //     normalises skill_name as a dedicated column (see schema.sql), so
@@ -1216,7 +1291,7 @@ func (db *DB) accumulateAdoption(
 	q := `SELECT session_id, tool_name, COALESCE(skill_name, '')
 		FROM tool_calls
 		WHERE session_id IN ` + ph + `
-			AND tool_name IN ('ExitPlanMode', 'Task', 'Skill')`
+			AND tool_name IN ('ExitPlanMode', 'Task', 'Agent', 'Skill')`
 	rows, err := db.getReader().QueryContext(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("querying adoption tool_calls: %w", err)
@@ -1230,7 +1305,7 @@ func (db *DB) accumulateAdoption(
 		switch toolName {
 		case "ExitPlanMode":
 			planModeSessions[sessionID] = struct{}{}
-		case "Task":
+		case "Task", "Agent":
 			*totalSubagents++
 		case "Skill":
 			if skillName != "" {
@@ -1262,13 +1337,6 @@ func (db *DB) accumulateAdoption(
 // is empty, both pointers stay nil so the JSON output distinguishes
 // "gh not configured" from "configured, zero PRs".
 //
-// Note on git log --author regex: git treats the --author argument as
-// a regex pattern, so emails containing regex metacharacters (e.g.
-// "user+tag@host") match more loosely than a literal would. For v1 this
-// is acceptable — typical emails do not need escaping — but future
-// versions should migrate to --fixed-strings once agentsview can
-// require a git version that supports it on all target platforms.
-//
 // from/to are the absolute window bounds already resolved by
 // windowBounds. They are formatted as RFC3339 UTC before being handed to
 // `git log --since/--until` (git accepts RFC3339) and to
@@ -1293,6 +1361,7 @@ func (db *DB) computeOutcomeStats(
 	until := to.UTC().Format(time.RFC3339)
 	cache := git.NewCache(db.getWriter())
 	out := &StatsOutcomeStats{}
+	contributed := false
 	for _, repo := range repos {
 		email := git.AuthorEmail(repo)
 		if email == "" {
@@ -1310,6 +1379,7 @@ func (db *DB) computeOutcomeStats(
 			)
 			continue
 		}
+		contributed = true
 		out.ReposActive++
 		out.Commits += logRes.Commits
 		out.LOCAdded += logRes.LOCAdded
@@ -1331,6 +1401,13 @@ func (db *DB) computeOutcomeStats(
 				addPtr(&out.PRsMerged, prRes.Merged)
 			}
 		}
+	}
+	// Leave OutcomeStats nil when every repo was skipped (missing
+	// author email) or every git command failed. Emitting an
+	// all-zero block would falsely advertise "no commits" when the
+	// real signal is "we couldn't derive any".
+	if !contributed {
+		return nil
 	}
 	s.OutcomeStats = out
 	return nil

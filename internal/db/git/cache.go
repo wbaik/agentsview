@@ -27,21 +27,28 @@ func NewCache(db *sql.DB) *Cache {
 }
 
 // CacheKey returns a hex-encoded sha256 digest of the (kind, repo, author,
-// since, until) tuple. The tuple is serialized with '|' separators; '|' is
-// rare enough in paths and email addresses that we don't bother escaping.
-// Any change to any field produces a different key.
+// since, until) tuple. Fields are encoded as JSON before hashing so any
+// field can contain arbitrary bytes (including '|', tabs, or newlines)
+// without colliding with another tuple. Any change to any field produces a
+// different key.
 func CacheKey(kind, repo, author, since, until string) string {
-	h := sha256.New()
-	h.Write([]byte(kind))
-	h.Write([]byte("|"))
-	h.Write([]byte(repo))
-	h.Write([]byte("|"))
-	h.Write([]byte(author))
-	h.Write([]byte("|"))
-	h.Write([]byte(since))
-	h.Write([]byte("|"))
-	h.Write([]byte(until))
-	return hex.EncodeToString(h.Sum(nil))
+	encoded, err := json.Marshal([]string{
+		kind, repo, author, since, until,
+	})
+	if err != nil {
+		// json.Marshal cannot fail for []string; fall back to a
+		// length-prefixed concatenation for robustness if it ever does.
+		encoded = fmt.Appendf(nil,
+			"%d:%s|%d:%s|%d:%s|%d:%s|%d:%s",
+			len(kind), kind,
+			len(repo), repo,
+			len(author), author,
+			len(since), since,
+			len(until), until,
+		)
+	}
+	h := sha256.Sum256(encoded)
+	return hex.EncodeToString(h[:])
 }
 
 // GetOrCompute returns the cached payload for key when present and within
@@ -105,6 +112,16 @@ func (c *Cache) lookup(
 	return []byte(payload), true, nil
 }
 
+// tokenIdentity returns a stable hex digest of ghToken suitable for
+// inclusion in a cache key. The raw token is never written into the key —
+// only this digest, which CacheKey hashes again. The result depends only
+// on the token bytes, so the same account/token always produces the same
+// identity slot.
+func tokenIdentity(ghToken string) string {
+	h := sha256.Sum256([]byte(ghToken))
+	return hex.EncodeToString(h[:])
+}
+
 // store upserts a cache row with the current time as computed_at.
 func (c *Cache) store(
 	ctx context.Context, key, kind string, payload []byte,
@@ -151,9 +168,14 @@ func AggregateLogCached(
 	return out, nil
 }
 
-// AggregatePRsCached wraps AggregatePRs with a TTL-bounded cache. Author is
-// left empty in the cache key because `--author=@me` is implicit in
-// AggregatePRs and is effectively a property of the token, not an argument.
+// AggregatePRsCached wraps AggregatePRs with a TTL-bounded cache.
+//
+// `--author=@me` resolves against the GitHub identity behind ghToken, so
+// the token effectively partitions the result set. To prevent one
+// account's PR counts from leaking into another's cache (after `gh auth
+// switch` or a token swap), the cache key includes a SHA-256 digest of
+// the token. The token itself never lands on disk — only its digest
+// appears in the key, which is itself hashed again by CacheKey.
 //
 // When ghToken == "", AggregatePRs returns (nil, nil) and this wrapper
 // mirrors that behavior without touching the cache — a nil PRResult is
@@ -167,7 +189,7 @@ func AggregatePRsCached(
 	if ghToken == "" {
 		return AggregatePRs(ctx, repo, since, until, ghToken)
 	}
-	key := CacheKey("pr", repo, "", since, until)
+	key := CacheKey("pr", repo, tokenIdentity(ghToken), since, until)
 	payload, err := cache.GetOrCompute(
 		ctx, key, "pr", ttl,
 		func() ([]byte, error) {
