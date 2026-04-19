@@ -27,8 +27,8 @@ type StatsFilter struct {
 }
 
 // GetSessionStats computes the v1 session-stats JSON response.
-// Sections not yet wired (adoption) remain at their zero values
-// until the tasks that implement them land.
+// Sections are populated in order so each step can reuse the per-session
+// rows (and derived sessionIDs) loaded once by loadSessionsInWindow.
 func (db *DB) GetSessionStats(
 	ctx context.Context, f StatsFilter,
 ) (*SessionStats, error) {
@@ -98,6 +98,10 @@ func (db *DB) GetSessionStats(
 	}
 
 	computeOutcomes(stats, rows)
+
+	if err := db.computeAdoption(ctx, stats, rows); err != nil {
+		return nil, fmt.Errorf("computing adoption: %w", err)
+	}
 
 	return stats, nil
 }
@@ -1127,4 +1131,91 @@ func computeOutcomes(s *SessionStats, rows []sessionStatsRow) {
 	out.AvgEditChurn = float64(totalChurn) /
 		float64(len(claudeRows))
 	s.Outcomes = out
+}
+
+// computeAdoption populates stats.Adoption for Claude sessions in the
+// window. The field is a nullable pointer — it stays nil whenever the
+// window contains zero agent="claude" sessions so the JSON output stays
+// absent for pure non-Claude workloads (matching the cache_economics
+// and outcomes convention: omitempty + nil).
+//
+// Metrics are derived from the tool_calls table, restricted to the
+// already-filtered Claude session IDs so window/project predicates flow
+// through transitively:
+//
+//   - PlanModeRate: distinct Claude sessions with at least one row where
+//     tool_name = "ExitPlanMode", divided by total Claude sessions.
+//     Always in [0, 1].
+//   - SubagentsPerSession: total tool_calls rows with tool_name = "Task",
+//     divided by total Claude sessions. Can exceed 1 (it is a mean).
+//   - DistinctSkills: count of distinct non-empty skill_name values
+//     recorded on rows with tool_name = "Skill". The schema already
+//     normalises skill_name as a dedicated column (see schema.sql), so
+//     no JSON parsing is required.
+func (db *DB) computeAdoption(
+	ctx context.Context, stats *SessionStats, rows []sessionStatsRow,
+) error {
+	claudeIDs := collectClaudeSessionIDs(rows)
+	if len(claudeIDs) == 0 {
+		return nil
+	}
+	planModeSessions := map[string]struct{}{}
+	skillNames := map[string]struct{}{}
+	var totalSubagents int
+	if err := queryChunked(claudeIDs,
+		func(chunk []string) error {
+			return db.accumulateAdoption(
+				ctx, chunk,
+				planModeSessions, skillNames, &totalSubagents,
+			)
+		}); err != nil {
+		return err
+	}
+	n := float64(len(claudeIDs))
+	stats.Adoption = &StatsAdoption{
+		ClaudeOnly:          true,
+		PlanModeRate:        float64(len(planModeSessions)) / n,
+		SubagentsPerSession: float64(totalSubagents) / n,
+		DistinctSkills:      len(skillNames),
+	}
+	return nil
+}
+
+// accumulateAdoption folds one chunk of Claude session IDs into the
+// three per-window accumulators. One pass over tool_calls scans only
+// the three tool_name values the adoption metrics need; a
+// single-column skill_name projection keeps the result set narrow.
+func (db *DB) accumulateAdoption(
+	ctx context.Context, sessionIDs []string,
+	planModeSessions map[string]struct{},
+	skillNames map[string]struct{},
+	totalSubagents *int,
+) error {
+	ph, args := inPlaceholders(sessionIDs)
+	q := `SELECT session_id, tool_name, COALESCE(skill_name, '')
+		FROM tool_calls
+		WHERE session_id IN ` + ph + `
+			AND tool_name IN ('ExitPlanMode', 'Task', 'Skill')`
+	rows, err := db.getReader().QueryContext(ctx, q, args...)
+	if err != nil {
+		return fmt.Errorf("querying adoption tool_calls: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sessionID, toolName, skillName string
+		if err := rows.Scan(&sessionID, &toolName, &skillName); err != nil {
+			return fmt.Errorf("scanning adoption tool_calls: %w", err)
+		}
+		switch toolName {
+		case "ExitPlanMode":
+			planModeSessions[sessionID] = struct{}{}
+		case "Task":
+			*totalSubagents++
+		case "Skill":
+			if skillName != "" {
+				skillNames[skillName] = struct{}{}
+			}
+		}
+	}
+	return rows.Err()
 }

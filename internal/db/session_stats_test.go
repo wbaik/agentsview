@@ -2285,3 +2285,173 @@ func TestGetSessionStats_Outcomes_NoGrade(t *testing.T) {
 		t.Errorf("Success: got %d want 1", out.Success)
 	}
 }
+
+// seedToolCallsByName inserts one assistant message per entry in calls and
+// a matching tool_calls row with the requested tool_name and skill_name.
+// Used by the adoption tests, which key off tool_name (not category) and
+// need to populate skill_name for the Skill tool.
+func seedToolCallsByName(
+	t *testing.T, d *DB, sessionID string, calls []toolCallSeed,
+) {
+	t.Helper()
+	if len(calls) == 0 {
+		return
+	}
+	msgs := make([]Message, 0, len(calls))
+	for i, c := range calls {
+		msgs = append(msgs, asstMsg(sessionID, i+1, "reply-"+c.toolName))
+	}
+	if err := d.InsertMessages(msgs); err != nil {
+		t.Fatalf("seedToolCallsByName %s: InsertMessages: %v",
+			sessionID, err)
+	}
+	for i, c := range calls {
+		ord := i + 1
+		var skill any
+		if c.skillName != "" {
+			skill = c.skillName
+		}
+		if _, err := d.getWriter().Exec(`
+			INSERT INTO tool_calls
+				(message_id, session_id, tool_name, category, skill_name)
+			SELECT id, session_id, ?, ?, ?
+			FROM messages
+			WHERE session_id = ? AND ordinal = ?`,
+			c.toolName, c.toolName, skill, sessionID, ord,
+		); err != nil {
+			t.Fatalf("seedToolCallsByName %s: %q: %v",
+				sessionID, c.toolName, err)
+		}
+	}
+}
+
+// toolCallSeed describes one tool_calls row for seedToolCallsByName.
+// skillName is written only for tool_name = "Skill"; other rows leave
+// the column NULL.
+type toolCallSeed struct {
+	toolName  string
+	skillName string
+}
+
+// TestGetSessionStats_Adoption_Happy seeds four Claude sessions with
+// deliberately asymmetric adoption signals and asserts every field on
+// StatsAdoption. A fifth codex session must not influence any number
+// (adoption is Claude-only).
+//
+// Rates are hand-computed against the seed:
+//   - PlanModeRate: 2 of 4 Claude sessions have >=1 ExitPlanMode -> 0.5
+//   - SubagentsPerSession: 3 Task calls across 4 sessions -> 0.75
+//   - DistinctSkills: {"brainstorm", "writing-plans", "brainstorm"}
+//     -> 2 distinct names
+func TestGetSessionStats_Adoption_Happy(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	// ad1: one ExitPlanMode, zero Task, one Skill("brainstorm").
+	insertSessionFixture(t, d, sessionFixture{
+		id: "ad1", agent: "claude", userMsgs: 4,
+		startedAt: hoursAgo(6),
+	})
+	seedToolCallsByName(t, d, "ad1", []toolCallSeed{
+		{toolName: "ExitPlanMode"},
+		{toolName: "Skill", skillName: "brainstorm"},
+	})
+
+	// ad2: zero ExitPlanMode, two Task calls, one Skill("writing-plans").
+	insertSessionFixture(t, d, sessionFixture{
+		id: "ad2", agent: "claude", userMsgs: 5,
+		startedAt: hoursAgo(5),
+	})
+	seedToolCallsByName(t, d, "ad2", []toolCallSeed{
+		{toolName: "Task"},
+		{toolName: "Task"},
+		{toolName: "Skill", skillName: "writing-plans"},
+	})
+
+	// ad3: one ExitPlanMode, one Task, one Skill("brainstorm") —
+	// duplicate skill name must collapse in DistinctSkills.
+	insertSessionFixture(t, d, sessionFixture{
+		id: "ad3", agent: "claude", userMsgs: 3,
+		startedAt: hoursAgo(4),
+	})
+	seedToolCallsByName(t, d, "ad3", []toolCallSeed{
+		{toolName: "ExitPlanMode"},
+		{toolName: "Task"},
+		{toolName: "Skill", skillName: "brainstorm"},
+	})
+
+	// ad4: nothing interesting — exercises the denominator.
+	insertSessionFixture(t, d, sessionFixture{
+		id: "ad4", agent: "claude", userMsgs: 3,
+		startedAt: hoursAgo(3),
+	})
+	seedToolCallsByName(t, d, "ad4", []toolCallSeed{
+		{toolName: "Read"},
+	})
+
+	// cx1 (codex) with matching tool names — must be excluded.
+	insertSessionFixture(t, d, sessionFixture{
+		id: "cx1", agent: "codex", userMsgs: 3,
+		startedAt: hoursAgo(2),
+	})
+	seedToolCallsByName(t, d, "cx1", []toolCallSeed{
+		{toolName: "ExitPlanMode"},
+		{toolName: "Task"},
+		{toolName: "Skill", skillName: "codex-only"},
+	})
+
+	stats, err := d.GetSessionStats(ctx, StatsFilter{Since: "28d"})
+	if err != nil {
+		t.Fatalf("GetSessionStats: %v", err)
+	}
+	ad := stats.Adoption
+	if ad == nil {
+		t.Fatalf("Adoption: got nil want populated")
+	}
+	if !ad.ClaudeOnly {
+		t.Errorf("ClaudeOnly: got false want true")
+	}
+	// 2 of 4 Claude sessions have ExitPlanMode -> 0.5.
+	if !floatsClose(ad.PlanModeRate, 0.5, 1e-9) {
+		t.Errorf("PlanModeRate: got %v want 0.5", ad.PlanModeRate)
+	}
+	if ad.PlanModeRate < 0 || ad.PlanModeRate > 1 {
+		t.Errorf("PlanModeRate out of [0,1]: got %v", ad.PlanModeRate)
+	}
+	// 3 Task calls across 4 Claude sessions -> 0.75.
+	if !floatsClose(ad.SubagentsPerSession, 0.75, 1e-9) {
+		t.Errorf("SubagentsPerSession: got %v want 0.75",
+			ad.SubagentsPerSession)
+	}
+	// {"brainstorm","writing-plans","brainstorm"} -> 2 distinct.
+	if ad.DistinctSkills != 2 {
+		t.Errorf("DistinctSkills: got %d want 2", ad.DistinctSkills)
+	}
+}
+
+// TestGetSessionStats_Adoption_NoClaude verifies that Adoption stays
+// nil — NOT zero-valued — when the window has no Claude sessions. A
+// *StatsAdoption with ClaudeOnly=false would misrepresent a pure codex
+// workload as having legitimate all-zero adoption signal.
+func TestGetSessionStats_Adoption_NoClaude(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	insertSessionFixture(t, d, sessionFixture{
+		id: "cx1", agent: "codex", userMsgs: 3,
+		startedAt: hoursAgo(2),
+	})
+	seedToolCallsByName(t, d, "cx1", []toolCallSeed{
+		{toolName: "ExitPlanMode"},
+		{toolName: "Task"},
+		{toolName: "Skill", skillName: "brainstorm"},
+	})
+
+	stats, err := d.GetSessionStats(ctx, StatsFilter{Since: "28d"})
+	if err != nil {
+		t.Fatalf("GetSessionStats: %v", err)
+	}
+	if stats.Adoption != nil {
+		t.Errorf("Adoption: got %+v want nil", stats.Adoption)
+	}
+}
