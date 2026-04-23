@@ -108,17 +108,16 @@ var (
 // a normalized copy of the input. Normalization (trim, drop
 // empty, length cap, dedupe within input, drop entries that
 // equal a built-in prefix) happens here so callers can pass the
-// raw list straight from config. Pass nil to clear.
-//
-// Returned int is the number of input entries that survived
-// normalization; intended for the caller to log a one-line
-// summary at startup. The function itself does not log.
-func SetUserAutomationPrefixes(prefixes []string) int {
+// raw list straight from config. Pass nil to clear. Idempotent
+// and silent — no logging, so it's safe to call from CLI paths
+// that need clean stdout (e.g. `agentsview usage --statusline`).
+// Callers that want a startup summary can read len(
+// UserAutomationPrefixes()) afterward.
+func SetUserAutomationPrefixes(prefixes []string) {
     cleaned := normalizeUserPrefixes(prefixes)
     userPrefixesMu.Lock()
     defer userPrefixesMu.Unlock()
     userPrefixes = cleaned
-    return len(cleaned)
 }
 
 // normalizeUserPrefixes applies the validation rules from the
@@ -158,9 +157,13 @@ func UserAutomationPrefixes() []string {
 }
 ```
 
-`applyClassifierConfig` (in `cmd/agentsview/classifier_wiring.go`) handles the
-single log line based on the count returned by `SetUserAutomationPrefixes`, e.g.
-`loaded 4 user automation prefix(es) from config`.
+`applyClassifierConfig` (in `cmd/agentsview/classifier_wiring.go`) is silent too
+— it just calls `SetUserAutomationPrefixes(cfg.Automated.Prefixes)`. Logging the
+loaded count is the responsibility of paths where stdout chatter is acceptable:
+`agentsview serve` startup logs (read `len(db.UserAutomationPrefixes())` after
+the helper returns) and `agentsview classifier rebuild` (which is explicitly an
+"explain what's happening" command). Quiet paths like `usage --statusline`,
+`session get --format json`, and `pg push` produce no extra log line.
 
 `IsAutomatedSession` gains a third loop after the built-in prefix loop:
 
@@ -316,7 +319,10 @@ Add `cmd/agentsview/classifier_wiring.go`:
 // applyClassifierConfig installs user-defined classifier
 // prefixes into the db package singleton. Every command that
 // loads config and may open SQLite or PostgreSQL must call
-// this before db.Open / postgres.Open.
+// this before db.Open / postgres.Open / postgres.NewStore /
+// postgres.New / postgres.EnsureSchema. Silent by design so
+// it's safe to call from quiet CLI paths (statusline, JSON
+// output, etc.); see SetUserAutomationPrefixes for rationale.
 func applyClassifierConfig(cfg config.Config) {
     db.SetUserAutomationPrefixes(cfg.Automated.Prefixes)
 }
@@ -383,12 +389,12 @@ into "loaded config but never wired the singleton."
 ## Data flow
 
 ```
-config.Load → AutomatedConfig.Prefixes (normalized slice)
+config.Load → AutomatedConfig.Prefixes (raw slice; no normalization)
             ↓
-applyClassifierConfig(cfg)   [in every command that opens a store]
+applyClassifierConfig(cfg)   [silent, in every command that opens a store]
             ↓
 db.SetUserAutomationPrefixes(prefixes)
-            ↓
+            ↓ (normalizes: trim, drop empty, length cap, dedupe, drop built-in overlap)
 db.Open
   └─ backfillIsAutomatedLocked
        ├─ ClassifierHash()  ← reads built-ins + user singleton
@@ -456,8 +462,12 @@ iterating on `[automated]` config locally.
 
 ### Behavior
 
-1. Loads config (so `Automated.Prefixes` is parsed and normalized; surfaces
-   config errors before touching the DB).
+1. Loads config and calls `applyClassifierConfig(cfg)` (which invokes
+   `SetUserAutomationPrefixes`, where normalization happens). Surfaces parse
+   errors before touching the DB. Then prints a single line
+   `loaded N user automation prefix(es) from config` so the user can verify
+   their edits parsed as expected — `classifier rebuild` is the "explain what's
+   happening" command, so this output belongs here.
 
 1. Refuses to run if any local daemon owns the DB. Detection reuses
    `detectTransport(cfg.DataDir, 0)` from `cmd/agentsview/transport.go`. Reject
