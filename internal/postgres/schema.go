@@ -558,27 +558,29 @@ func createPartialIndexesPG(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-const isAutomatedBackfillMetadataKey = "is_automated_backfill_v3"
+const classifierHashMetadataKey = "is_automated_classifier_hash"
 
 // backfillIsAutomatedPG recomputes is_automated for all PG
 // sessions, correcting both false negatives (new patterns) and
 // stale false positives (patterns tightened since last run).
-// Guarded by a sync_metadata marker so it only runs once per
-// pattern version.
+// Gated by a stored classifier hash so it only runs when the
+// classifier set (built-in patterns + user prefixes + algorithm
+// version) has changed since the last successful run.
 func backfillIsAutomatedPG(
 	ctx context.Context, pg *sql.DB,
 ) error {
-	var done int
-	if err := pg.QueryRowContext(ctx,
-		`SELECT count(*) FROM sync_metadata
-		 WHERE key = $1 AND value != ''`,
-		isAutomatedBackfillMetadataKey,
-	).Scan(&done); err != nil {
+	current := db.ClassifierHash()
+	var stored string
+	err := pg.QueryRowContext(ctx,
+		`SELECT value FROM sync_metadata WHERE key = $1`,
+		classifierHashMetadataKey,
+	).Scan(&stored)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf(
-			"probing PG automated backfill marker: %w", err,
+			"probing PG classifier hash: %w", err,
 		)
 	}
-	if done > 0 {
+	if err == nil && stored == current {
 		return nil
 	}
 
@@ -599,18 +601,18 @@ func backfillIsAutomatedPG(
 	for rows.Next() {
 		var id, fm string
 		var umc int
-		var current bool
+		var rowAutomated bool
 		if err := rows.Scan(
-			&id, &fm, &umc, &current,
+			&id, &fm, &umc, &rowAutomated,
 		); err != nil {
 			return fmt.Errorf(
 				"scanning PG backfill candidate: %w", err,
 			)
 		}
 		want := umc <= 1 && db.IsAutomatedSession(fm)
-		if want && !current {
+		if want && !rowAutomated {
 			setIDs = append(setIDs, id)
-		} else if !want && current {
+		} else if !want && rowAutomated {
 			clearIDs = append(clearIDs, id)
 		}
 	}
@@ -637,14 +639,18 @@ func backfillIsAutomatedPG(
 		)
 	}
 
-	_, err = pg.ExecContext(ctx,
+	if _, err := pg.ExecContext(ctx,
 		`INSERT INTO sync_metadata (key, value)
-		 VALUES ($1, '1')
+		 VALUES ($1, $2)
 		 ON CONFLICT (key) DO UPDATE
 		 SET value = EXCLUDED.value`,
-		isAutomatedBackfillMetadataKey,
-	)
-	return err
+		classifierHashMetadataKey, current,
+	); err != nil {
+		return fmt.Errorf(
+			"storing PG classifier hash: %w", err,
+		)
+	}
+	return nil
 }
 
 func batchUpdateAutomatedPG(

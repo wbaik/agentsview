@@ -718,9 +718,7 @@ func (s *Sync) pushSession(
 	ctx context.Context, tx *sql.Tx, sess db.Session,
 ) error {
 	createdAt, _ := ParseSQLiteTimestamp(sess.CreatedAt)
-	isAutomated := sess.UserMessageCount <= 1 &&
-		sess.FirstMessage != nil &&
-		db.IsAutomatedSession(*sess.FirstMessage)
+	isAutomated := sess.IsAutomated
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO sessions (
 			id, machine, project, agent,
