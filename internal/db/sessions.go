@@ -447,27 +447,29 @@ func buildSessionFilter(f SessionFilter) (string, []any) {
 		filterArgs = append(filterArgs, *f.MinToolFailures)
 	}
 
-	// Simple case: no IncludeChildren or no user filters.
-	hasFilters := len(filterPreds) > 0 || oneShotPred != ""
-	if !f.IncludeChildren || !hasFilters {
+	// Simple case: children not included — basePreds already
+	// carries the relationship_type guard, so subagent/fork
+	// rows are dropped and no OR-branch is needed.
+	if !f.IncludeChildren {
 		allPreds := append(basePreds, filterPreds...)
+		if oneShotPred != "" {
+			allPreds = append(allPreds, oneShotPred)
+		}
 		return strings.Join(allPreds, " AND "), filterArgs
 	}
 
-	// IncludeChildren + filters: match the filter directly,
-	// or be a child of a session that matches the filter.
-	// This scopes children to their parent's filter match
-	// instead of including all children in the database.
+	// IncludeChildren: a row is included when it is a valid
+	// root that matches the user filters, OR when its parent
+	// is a session that matches the user filters. Subagents
+	// and forks are child workflows (Task tool spawns, chat
+	// forks) and must never surface as standalone roots;
+	// without the relationship guard on the direct-match
+	// side, orphans (parent JSONL rotated off disk, or parent
+	// filtered out by is_automated) appear as fake sidebar
+	// root groups.
 	baseWhere := strings.Join(basePreds, " AND ")
 
-	// Root match: must pass all filter predicates + one-shot,
-	// AND not be a subagent/fork. Subagents and forks are child
-	// workflows (Task tool spawns, chat forks) that should only
-	// surface via their parent — never as standalone roots.
-	// Without this guard, orphan subagents (whose parent JSONL
-	// was rotated off disk by Claude Code, or whose parent is
-	// filtered out by e.g. is_automated) appear as fake root
-	// groups in the sidebar.
+	// Direct-match side: user filters + relationship guard.
 	rootMatchParts := append([]string{}, filterPreds...)
 	if oneShotPred != "" {
 		rootMatchParts = append(rootMatchParts, oneShotPred)
@@ -476,18 +478,30 @@ func buildSessionFilter(f SessionFilter) (string, []any) {
 		"relationship_type NOT IN ('subagent', 'fork')")
 	rootMatch := strings.Join(rootMatchParts, " AND ")
 
-	// Subquery for parent inclusion: same criteria as root
-	// match so only children of qualifying parents appear.
+	// Parent-match side (subquery): user filters WITHOUT the
+	// relationship guard. A subagent is a legitimate parent in
+	// a deeper chain (e.g. a fork spawned inside a subagent
+	// thread) — we only require the immediate parent to pass
+	// the user filters, not to itself be a root. This keeps
+	// depth-2+ descendants visible; the only corner it misses
+	// is an orphan subagent with its own descendants, which is
+	// rare and already displays oddly because its intermediate
+	// parent is missing from the loaded set.
+	parentMatchParts := append([]string{}, filterPreds...)
+	if oneShotPred != "" {
+		parentMatchParts = append(parentMatchParts, oneShotPred)
+	}
 	subqWhere := "message_count > 0 AND deleted_at IS NULL"
-	if rootMatch != "" {
-		subqWhere += " AND " + rootMatch
+	if len(parentMatchParts) > 0 {
+		subqWhere += " AND " + strings.Join(parentMatchParts, " AND ")
 	}
 
 	where := baseWhere + " AND (" + rootMatch +
 		" OR parent_session_id IN" +
 		" (SELECT id FROM sessions WHERE " + subqWhere + "))"
 
-	// Args appear twice: outer root match + subquery.
+	// Args appear twice: once on the direct side, once in the
+	// subquery. Both sides substitute the same filterArgs.
 	allArgs := make([]any, 0, len(filterArgs)*2)
 	allArgs = append(allArgs, filterArgs...)
 	allArgs = append(allArgs, filterArgs...)

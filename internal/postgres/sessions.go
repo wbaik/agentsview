@@ -270,18 +270,22 @@ func buildPGSessionFilter(
 				pb.add(*f.MinToolFailures))
 	}
 
-	hasFilters := len(filterPreds) > 0 || oneShotPred != ""
-	if !f.IncludeChildren || !hasFilters {
+	if !f.IncludeChildren {
 		allPreds := append(basePreds, filterPreds...)
+		if oneShotPred != "" {
+			allPreds = append(allPreds, oneShotPred)
+		}
 		return strings.Join(allPreds, " AND "), pb.args
 	}
 
+	// Mirrors SQLite buildSessionFilter — see that comment
+	// for rationale. The direct-match side carries the
+	// relationship guard so subagent/fork rows only surface
+	// via a qualifying parent; the parent-side subquery
+	// drops the guard so depth-2+ descendants (e.g. a fork
+	// inside a subagent thread) stay visible.
 	baseWhere := strings.Join(basePreds, " AND ")
 
-	// Root match: must pass all filter predicates + one-shot,
-	// AND not be a subagent/fork. Mirrors SQLite buildSessionFilter
-	// — see that comment for rationale. Without this guard, orphan
-	// subagents appear as fake root groups in the sidebar.
 	rootMatchParts := append([]string{}, filterPreds...)
 	if oneShotPred != "" {
 		rootMatchParts = append(rootMatchParts, oneShotPred)
@@ -290,9 +294,14 @@ func buildPGSessionFilter(
 		"relationship_type NOT IN ('subagent', 'fork')")
 	rootMatch := strings.Join(rootMatchParts, " AND ")
 
+	parentMatchParts := append([]string{}, filterPreds...)
+	if oneShotPred != "" {
+		parentMatchParts = append(parentMatchParts, oneShotPred)
+	}
 	subqWhere := "message_count > 0 AND deleted_at IS NULL"
-	if rootMatch != "" {
-		subqWhere += " AND " + rootMatch
+	if len(parentMatchParts) > 0 {
+		subqWhere += " AND " +
+			strings.Join(parentMatchParts, " AND ")
 	}
 
 	where := baseWhere + " AND (" + rootMatch +

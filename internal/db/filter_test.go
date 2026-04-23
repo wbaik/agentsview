@@ -556,6 +556,80 @@ func TestIncludeChildrenExcludesOrphanSubagents(t *testing.T) {
 	requireSessions(t, d, f, []string{"root", "root-sub"})
 }
 
+// TestIncludeChildrenKeepsNestedDescendants guards against a
+// regression where a fork spawned inside a subagent thread
+// (root → subagent → fork) was dropped. The direct-match side
+// excludes fork rows, and a naive subquery that also excluded
+// subagent rows would reject the fork's immediate parent. The
+// parent-side subquery must therefore drop the relationship
+// guard so depth-2+ descendants stay visible.
+func TestIncludeChildrenKeepsNestedDescendants(t *testing.T) {
+	d := testDB(t)
+
+	// Root: non-automated, multi-turn, claude.
+	insertSession(t, d, "root", "proj", func(s *Session) {
+		s.Agent = "claude"
+		s.MessageCount = 10
+		s.UserMessageCount = 5
+	})
+	// Subagent child of root.
+	insertSession(t, d, "sub", "proj", func(s *Session) {
+		s.Agent = "claude"
+		s.MessageCount = 4
+		s.UserMessageCount = 1
+		s.ParentSessionID = Ptr("root")
+		s.RelationshipType = "subagent"
+	})
+	// Fork spawned inside the subagent thread (depth-2).
+	insertSession(t, d, "nested-fork", "proj", func(s *Session) {
+		s.Agent = "claude"
+		s.MessageCount = 3
+		s.UserMessageCount = 1
+		s.ParentSessionID = Ptr("sub")
+		s.RelationshipType = "fork"
+	})
+
+	f := SessionFilter{
+		IncludeChildren:  true,
+		ExcludeAutomated: true,
+	}
+	requireSessions(t, d, f, []string{
+		"root", "sub", "nested-fork",
+	})
+}
+
+// TestIncludeChildrenNoFiltersExcludesOrphanChildren verifies
+// that the relationship guard applies even when no user
+// filters are active. The prior early-return on !hasFilters
+// left orphan subagent/fork rows unguarded; toggling
+// "include automated" with nothing else selected could
+// resurrect them as fake roots.
+func TestIncludeChildrenNoFiltersExcludesOrphanChildren(t *testing.T) {
+	d := testDB(t)
+
+	insertSession(t, d, "root", "proj", func(s *Session) {
+		s.MessageCount = 5
+		s.UserMessageCount = 3
+	})
+	insertSession(t, d, "child", "proj", func(s *Session) {
+		s.MessageCount = 2
+		s.UserMessageCount = 1
+		s.ParentSessionID = Ptr("root")
+		s.RelationshipType = "subagent"
+	})
+	insertSession(t, d, "orphan", "proj", func(s *Session) {
+		s.MessageCount = 2
+		s.UserMessageCount = 1
+		s.ParentSessionID = Ptr("nowhere")
+		s.RelationshipType = "subagent"
+	})
+
+	f := SessionFilter{IncludeChildren: true}
+	// No user filters, but the guard still applies: orphan is
+	// excluded, legitimate root+child survive.
+	requireSessions(t, d, f, []string{"root", "child"})
+}
+
 func TestIncludeChildrenExcludeOneShotAgent(t *testing.T) {
 	d := testDB(t)
 
