@@ -20,8 +20,13 @@ import (
 
 func newClassifierCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:          "classifier",
-		Short:        "Manage the automated-session classifier",
+		Use:   "classifier",
+		Short: "Manage the automated-session classifier",
+		// Hidden because routine config.toml edits are auto-detected
+		// on daemon restart via hash comparison; this group is a
+		// recovery hatch (downgrade-then-upgrade, manual PG state
+		// surgery) that most users never need.
+		Hidden:       true,
 		GroupID:      groupMeta,
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,

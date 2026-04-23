@@ -237,3 +237,14 @@ func TestClassifierRebuildSkipsPGWhenNotConfigured(t *testing.T) {
 		t.Fatalf("unexpected error when PG unconfigured: %v", err)
 	}
 }
+
+// TestClassifierCommandIsHidden pins the UX decision that the
+// classifier group does not appear in `agentsview --help`.
+// Routine config edits are auto-detected on daemon restart;
+// this group is a recovery hatch.
+func TestClassifierCommandIsHidden(t *testing.T) {
+	cmd := newClassifierCommand()
+	if !cmd.Hidden {
+		t.Errorf("classifier command should be Hidden=true; got false")
+	}
+}
