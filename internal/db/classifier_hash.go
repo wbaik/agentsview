@@ -1,0 +1,42 @@
+package db
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"hash"
+	"sort"
+)
+
+// classifierAlgorithmVersion bumps when the matching *logic*
+// changes (e.g. a future case-insensitivity flag). Pattern
+// edits do NOT bump this — those are detected automatically
+// by including the pattern slices in the hash. Bumping this
+// constant invalidates every stored hash and forces a
+// backfill on next open of any DB.
+const classifierAlgorithmVersion = 1
+
+// ClassifierHash returns a stable hex-encoded SHA-256 over
+// the algorithm version, all built-in pattern slices, and the
+// currently configured user prefixes. Inputs are sorted
+// before hashing so config order doesn't affect the result.
+// Tagged + length-prefixed encoding prevents splice
+// collisions between slice boundaries (e.g. moving an entry
+// from substrings to exact-matches must change the hash).
+func ClassifierHash() string {
+	h := sha256.New()
+	fmt.Fprintf(h, "v%d\n", classifierAlgorithmVersion)
+	writeSorted(h, "P", automatedPrefixes)
+	writeSorted(h, "S", automatedSubstrings)
+	writeSorted(h, "E", automatedExactMatches)
+	writeSorted(h, "U", UserAutomationPrefixes())
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func writeSorted(h hash.Hash, tag string, items []string) {
+	sorted := append([]string(nil), items...)
+	sort.Strings(sorted)
+	for _, s := range sorted {
+		fmt.Fprintf(h, "%s\t%d\t%s\n", tag, len(s), s)
+	}
+}
