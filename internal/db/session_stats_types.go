@@ -1,8 +1,17 @@
 package db
 
 // SessionStats is the top-level v1 output of GetSessionStats.
-// schema_version is locked at 1 for this CLI release; changes to
-// bucket boundaries or field semantics require a version bump.
+// schema_version is locked at 1. Additive fields (new keys that
+// old consumers can ignore) and semantic tightening (e.g., routing
+// an existing field through a stricter definition) are allowed
+// within v1 without a bump as long as the field *shape* stays
+// compatible. Incompatible shape changes or bucket-boundary shifts
+// still require a version bump.
+//
+// Feature detection by consumers should use the presence of
+// specific fields (e.g., agent_portfolio.by_sessions_human) or the
+// reporter's agentsview_version, not schema_version, for non-bump
+// changes.
 type SessionStats struct {
 	SchemaVersion  int                  `json:"schema_version"`
 	Window         StatsWindow          `json:"window"`
