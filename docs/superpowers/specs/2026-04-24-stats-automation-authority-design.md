@@ -35,8 +35,9 @@ and `IsAutomatedSession`); consumers get those improvements for free.
 
 ## Changes — agentsview
 
-All changes isolated to `internal/db/session_stats.go` (and its test file). No
-other analytics code changes.
+Code changes are isolated to `internal/db/session_stats.go`,
+`internal/db/session_stats_types.go`, and their stats tests. No other analytics
+code changes.
 
 ### 1. Project `is_automated` into `sessionStatsRow`
 
@@ -68,12 +69,12 @@ Effect on representative data: 71 short non-automated sessions on one snapshot
 shift from `Automation` bucket into `Quick`. `SessionsAutomation` drops by 71;
 `SessionsHuman` rises by 71. Numerically small, semantically correct.
 
-`archetypeLabel(userMsgs int)` stays as a pure userMessageCount-to-band function
-but its "automation" case becomes dead for the stats pipeline (automation is
-decided upstream by the flag). Delete the "automation" case and rename the
-function to make its role — shape classification — explicit, e.g.,
-`nonAutomationArchetypeLabel`. Callers assign "automation" directly when
-`isAutomated`, then fall through to the renamed helper.
+Rename `archetypeLabel(userMsgs int)` to `sessionShapeLabel` and make it a
+shape-only helper. Callers assign `"automation"` directly when `isAutomated`,
+then call `sessionShapeLabel` only for non-automated rows. Because short
+non-automated sessions are valid, the renamed helper maps `userMsgs <= 5` to
+`"quick"`; the old `userMsgs <= 1 -> "automation"` branch is deleted rather than
+left unreachable.
 
 ### 3. `computeDistributions` — `scope_human` reads the flag
 
@@ -117,12 +118,24 @@ Stays at 1.
   flag that's already authoritative elsewhere.
 - Bumping would force `SUPPORTED_VERSIONS` updates across consumers for a
   non-breaking change.
+- Update the existing schema-contract comments/docs that currently say any field
+  semantic change requires a bump (`internal/db/session_stats_types.go` and
+  tkmx-server's SessionStats OpenAPI text). The contract for v1 becomes:
+  additive fields and bug-fix/tightening semantics are allowed when old
+  consumers remain shape-compatible; incompatible shape or bucket-boundary
+  changes still require a bump. Feature detection for this rollout uses
+  `by_sessions_human` presence plus per-machine `agentsview_version`, not
+  `schema_version`.
 
 ### 6. Tests
 
 - `session_stats_test.go:563` uses `userMsgs <= 1` as its automation proxy in
   test fixtures. Switch fixtures to set `is_automated` explicitly so the test
-  asserts the new contract.
+  asserts the new contract. The current `sessionFixture.isAutomated` assignment
+  is not enough by itself because `UpsertSession` recomputes the flag from
+  `FirstMessage`; either set a matching first message for natural fixtures or
+  patch `sessions.is_automated` with test-only SQL after `UpsertSession` for
+  divergence fixtures.
 - Add fixtures covering the divergence between `userMessageCount <= 1` and
   `is_automated`:
   - Short non-automated session (userMsgs=1, is_automated=0) — lands in `Quick`,
@@ -146,53 +159,74 @@ Extend to aggregate the new peer maps:
 function mergeAgentPortfolio(blobs) {
   const by_sessions = {}, by_tokens = {}, by_messages = {};
   const by_sessions_human = {}, by_tokens_human = {}, by_messages_human = {};
-  let any_human_reported = false;
+  let portfolio_blob_count = 0;
+  let human_reported_blobs = 0;
   for (const b of blobs) {
     const p = b.agent_portfolio || {};
+    const has_portfolio = p.by_sessions !== undefined;
+    if (has_portfolio) portfolio_blob_count++;
     for (const [k, v] of Object.entries(p.by_sessions || {})) by_sessions[k] = (by_sessions[k] || 0) + v;
     for (const [k, v] of Object.entries(p.by_tokens   || {})) by_tokens[k]   = (by_tokens[k]   || 0) + v;
     for (const [k, v] of Object.entries(p.by_messages || {})) by_messages[k] = (by_messages[k] || 0) + v;
     if (p.by_sessions_human !== undefined) {
-      any_human_reported = true;
+      human_reported_blobs++;
       for (const [k, v] of Object.entries(p.by_sessions_human || {})) by_sessions_human[k] = (by_sessions_human[k] || 0) + v;
       for (const [k, v] of Object.entries(p.by_tokens_human   || {})) by_tokens_human[k]   = (by_tokens_human[k]   || 0) + v;
       for (const [k, v] of Object.entries(p.by_messages_human || {})) by_messages_human[k] = (by_messages_human[k] || 0) + v;
     }
   }
   const primary = pickPrimary(by_sessions);
+  const any_human_reported = human_reported_blobs > 0;
+  const all_human_reported = portfolio_blob_count > 0 &&
+    human_reported_blobs === portfolio_blob_count;
   const primary_human = any_human_reported ? pickPrimary(by_sessions_human) : "";
   return {
     by_sessions, by_tokens, by_messages, primary,
     ...(any_human_reported && {
       by_sessions_human, by_tokens_human, by_messages_human,
-      primary_human, any_human_reported: true,
+      primary_human,
+      any_human_reported: true,
+      all_human_reported,
+      human_reported_blobs,
+      portfolio_blob_count,
     }),
   };
 }
 ```
 
 `any_human_reported` tells the renderer the difference between "no machines
-reported human data" (legacy blobs only) and "human counts are zero" (all
-sessions on new machines are automation).
+reported human data" (legacy blobs only) and "human counts are zero" (new data
+exists, but zero human sessions). `all_human_reported` / the count fields tell
+the renderer whether the human maps are complete for every portfolio-bearing
+blob. Minimal synthetic blobs that only carry legacy `outcome_stats` do not
+count as portfolio-bearing.
 
 Lift the existing ad-hoc "pick top by sessions" into a `pickPrimary` helper so
-both `primary` and `primary_human` use the same logic.
+both `primary` and `primary_human` use the same logic. Match agentsview's
+tie-break: highest session count wins; equal counts choose the lexicographically
+smallest agent for deterministic output.
 
 ### 2. `server/public/profile.js:renderAgentPortfolio`
 
 Decision rule:
 
-- If `ap.any_human_reported` is true: render the human-scoped portfolio
+- If `ap.all_human_reported` is true: render the human-scoped portfolio
   (`by_sessions_human`, `primary_human`) as the Multi-Agent Portfolio. Add a
   subtitle clarifying the scope: "Human sessions only — automated runs
   excluded."
+- If `ap.any_human_reported` is true but `ap.all_human_reported` is false: keep
+  rendering all-sessions (current behavior) and show a mixed-fleet note:
+  "Includes automated sessions until all machines update agentsview." Include
+  `human_reported_blobs / portfolio_blob_count` if present so the undercount
+  risk is visible without switching the primary chart to partial data.
 - Otherwise: render all-sessions (current behavior) with a small note: "Includes
   automated sessions. Update agentsview to v<N> to exclude them." Link to the
   agentsview install instructions.
 
-When `any_human_reported` is true but every blob reported zero human sessions
+When `all_human_reported` is true but every blob reported zero human sessions
 across all agents (empty maps), render a "no human sessions in the window" empty
-state rather than a blank chart.
+state rather than a blank chart. In mixed fleets, do not use the empty human map
+as an empty state because legacy machines may still contain human sessions.
 
 ### 3. Version gate
 
@@ -206,10 +240,12 @@ the server still handles mixed fleets gracefully during the rollout window.
 
 - `test/session_stats_aggregate.test.js`: extend existing `mergeAgentPortfolio`
   tests with fixtures that include `by_sessions_human`, fixtures that omit it
-  (legacy), and mixed-fleet fixtures. Assert `any_human_reported` flips
+  (legacy), and mixed-fleet fixtures. Assert `any_human_reported`,
+  `all_human_reported`, `human_reported_blobs`, and `portfolio_blob_count` flip
   accordingly.
-- Snapshot test for `renderAgentPortfolio` HTML output under the three fixture
-  shapes (human-only, legacy-only, mixed).
+- Snapshot or string-output test for `renderAgentPortfolio` HTML output under
+  four fixture shapes: complete human-capable, legacy-only, mixed, and complete
+  human-capable with zero human sessions.
 
 ## Changes — tkmx-client
 
@@ -224,13 +260,14 @@ flow through automatically.
 | old        | old         | Status quo.                                                                                |
 | old        | new         | Renders all-sessions portfolio + update nag.                                               |
 | new        | old         | New fields silently ignored by the old merger; no regression. Old portfolio still renders. |
-| new        | new         | Human-scoped portfolio rendered.                                                           |
+| new        | new         | Human-scoped portfolio rendered once all portfolio blobs include human maps.               |
 
 **Mixed fleets** (one machine old, one new, same user): the aggregator sums
 what's present. All-sessions totals stay accurate. `any_human_reported` flips
-true on the first new-agentsview blob, so the renderer switches to the human
-portfolio — which undercounts human sessions (the old-agentsview machines
-contribute zero to the human maps) until every machine upgrades. The existing
+true on the first new-agentsview blob, but `all_human_reported` stays false
+until every portfolio-bearing blob has human maps. During that window, the
+renderer keeps the all-sessions portfolio and shows an update note rather than
+switching to partial human-scoped data. The existing
 `MINIMUM_AGENTSVIEW_VERSION` freeze is the forcing function.
 
 ## Non-goals
