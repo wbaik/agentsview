@@ -666,35 +666,7 @@ func (db *DB) PurgeExcludedSessions() error {
 	return err
 }
 
-// UpsertSession inserts or updates a session.
-// Sessions that were permanently deleted (in excluded_sessions)
-// are silently skipped.
-func (db *DB) UpsertSession(s Session) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	// Check exclusion under the write lock to avoid a race with
-	// concurrent DeleteSession/EmptyTrash.
-	var excluded int
-	_ = db.getWriter().QueryRow(
-		"SELECT 1 FROM excluded_sessions WHERE id = ?", s.ID,
-	).Scan(&excluded)
-	if excluded == 1 {
-		return ErrSessionExcluded
-	}
-
-	isAutomated := s.UserMessageCount <= 1 &&
-		s.FirstMessage != nil &&
-		IsAutomatedSession(*s.FirstMessage)
-
-	// data_version is intentionally NOT advanced here. The
-	// caller must call SetSessionDataVersion only after the
-	// associated message rewrite succeeds, so a transient
-	// failure to write messages doesn't mark the file as
-	// up-to-date and starve the rewrite on the next sync.
-	// New rows are seeded with 0 (the default) and bumped to
-	// the current version once their messages land.
-	_, err := db.getWriter().Exec(`
+const upsertSessionSQL = `
 		INSERT INTO sessions (
 			id, project, machine, agent, first_message, display_name,
 			started_at, ended_at, message_count,
@@ -736,19 +708,59 @@ func (db *DB) UpsertSession(s Session) error {
 			file_mtime = excluded.file_mtime,
 			file_inode = excluded.file_inode,
 			file_device = excluded.file_device,
-			file_hash = excluded.file_hash`,
+			file_hash = excluded.file_hash`
+
+func sessionIsAutomated(s Session) bool {
+	return s.UserMessageCount <= 1 &&
+		s.FirstMessage != nil &&
+		IsAutomatedSession(*s.FirstMessage)
+}
+
+func upsertSessionArgs(s Session) []any {
+	return []any{
 		s.ID, s.Project, s.Machine, s.Agent, s.FirstMessage, s.DisplayName,
 		s.StartedAt, s.EndedAt, s.MessageCount,
 		s.UserMessageCount, s.ParentSessionID,
 		s.RelationshipType,
 		s.TotalOutputTokens, s.PeakContextTokens,
 		s.HasTotalOutputTokens, s.HasPeakContextTokens,
-		isAutomated,
+		sessionIsAutomated(s),
 		s.Cwd, s.GitBranch, s.SourceSessionID,
 		s.SourceVersion, s.ParserMalformedLines,
 		s.IsTruncated,
 		s.FilePath, s.FileSize, s.FileMtime,
-		s.FileInode, s.FileDevice, s.FileHash)
+		s.FileInode, s.FileDevice, s.FileHash,
+	}
+}
+
+// UpsertSession inserts or updates a session.
+// Sessions that were permanently deleted (in excluded_sessions)
+// are silently skipped.
+func (db *DB) UpsertSession(s Session) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	// Check exclusion under the write lock to avoid a race with
+	// concurrent DeleteSession/EmptyTrash.
+	var excluded int
+	_ = db.getWriter().QueryRow(
+		"SELECT 1 FROM excluded_sessions WHERE id = ?", s.ID,
+	).Scan(&excluded)
+	if excluded == 1 {
+		return ErrSessionExcluded
+	}
+
+	// data_version is intentionally NOT advanced here. The
+	// caller must call SetSessionDataVersion only after the
+	// associated message rewrite succeeds, so a transient
+	// failure to write messages doesn't mark the file as
+	// up-to-date and starve the rewrite on the next sync.
+	// New rows are seeded with 0 (the default) and bumped to
+	// the current version once their messages land.
+	_, err := db.getWriter().Exec(
+		upsertSessionSQL,
+		upsertSessionArgs(s)...,
+	)
 	if err != nil {
 		return fmt.Errorf("upserting session %s: %w", s.ID, err)
 	}

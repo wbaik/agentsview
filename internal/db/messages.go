@@ -192,7 +192,7 @@ func (db *DB) GetAllMessages(
 // insertMessagesTx batch-inserts messages within an existing
 // transaction. Returns a slice of message IDs parallel to the
 // input msgs slice. The caller must hold db.mu.
-func (db *DB) insertMessagesTx(
+func insertMessagesTx(
 	tx *sql.Tx, msgs []Message,
 ) ([]int64, error) {
 	stmt, err := tx.Prepare(fmt.Sprintf(`
@@ -350,7 +350,7 @@ func (db *DB) InsertMessages(msgs []Message) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	ids, err := db.insertMessagesTx(tx, msgs)
+	ids, err := insertMessagesTx(tx, msgs)
 	if err != nil {
 		return err
 	}
@@ -515,7 +515,7 @@ func (db *DB) ReplaceSessionMessages(
 	}
 
 	if len(msgs) > 0 {
-		ids, err := db.insertMessagesTx(tx, msgs)
+		ids, err := insertMessagesTx(tx, msgs)
 		if err != nil {
 			return err
 		}
