@@ -159,7 +159,7 @@
   }
   .call .cbar-wrap {
     height: 9px;
-    background: #1f1f1f;
+    background: transparent;
     border-radius: 1px;
     position: relative;
     overflow: hidden;

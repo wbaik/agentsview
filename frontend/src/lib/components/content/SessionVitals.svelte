@@ -127,19 +127,34 @@
     if (turn) ui.scrollToOrdinal(turn.ordinal);
   }
 
-  // Bar width for one call, scaled against the supplied session's
-  // total wall-clock duration. Solo calls render at their own
-  // duration; parallel siblings (duration_ms == null) fall back to
-  // the parent turn's duration so they fill the same fraction as
-  // the group header.
+  // Bar width for one call, scaled against the longest call duration
+  // in the supplied session's scope. The slowest call fills the bar;
+  // everything else is relative to it, so call-vs-call comparisons are
+  // legible even in long sessions where any single call is a tiny
+  // fraction of total wall-clock. Parallel siblings (duration_ms ==
+  // null) fall back to the parent turn's duration.
+  function maxCallMs(t: SessionTiming): number {
+    let max = 0;
+    for (const turn of t.turns) {
+      for (const call of turn.calls) {
+        const d = call.duration_ms ?? 0;
+        if (d > max) max = d;
+      }
+    }
+    return max;
+  }
+
   function callBarPct(c: CallTiming, t: SessionTiming): number {
-    if (t.total_duration_ms <= 0) return 0;
+    const maxMs = maxCallMs(t);
+    if (maxMs <= 0) return 0;
     let dur = c.duration_ms;
     if (dur == null) {
       const turn = t.turns.find((tt) => tt.calls.includes(c));
       dur = turn?.duration_ms ?? 0;
     }
-    return Math.min(100, (dur / t.total_duration_ms) * 100);
+    if (dur <= 0) return 0;
+    const pct = (dur / maxMs) * 100;
+    return Math.min(100, Math.max(pct, 4));
   }
 
   function turnHeaderBarPct(
