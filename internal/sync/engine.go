@@ -1447,20 +1447,22 @@ func (e *Engine) syncAllLocked(
 	tCV := time.Now()
 	cvPending, cvSynced := e.syncCursorVscdb()
 	e.cursorVscdbSynced = cvSynced
-	cvCount := len(cvPending)
+	var cvWritten, cvFailed int
 	for _, pw := range cvPending {
-		e.writeSessionFull(pw)
+		switch err := e.writeSessionFull(pw); {
+		case err == nil:
+			cvWritten++
+		case errors.Is(err, db.ErrSessionExcluded),
+			errors.Is(err, errSessionPreserved):
+			// Intentional skip, not a failure.
+		default:
+			cvFailed++
+		}
 	}
-	if verbose && cvCount > 0 {
+	if verbose && len(cvPending) > 0 {
 		log.Printf(
-			"cursor vscdb write: %d sessions in %s",
-			cvCount,
-			time.Since(tCV).Round(time.Millisecond),
-		)
-	}
-	if verbose {
-		log.Printf(
-			"cursor vscdb sync: %s",
+			"cursor vscdb write: %d synced, %d failed in %s",
+			cvWritten, cvFailed,
 			time.Since(tCV).Round(time.Millisecond),
 		)
 	}
@@ -1474,9 +1476,12 @@ func (e *Engine) syncAllLocked(
 	e.cursorVscdbSynced = nil
 
 	// Fold cursor vscdb stats into the combined stats.
-	if cvCount > 0 {
-		stats.TotalSessions += cvCount
-		stats.RecordSynced(cvCount)
+	if len(cvPending) > 0 {
+		stats.TotalSessions += len(cvPending)
+		stats.RecordSynced(cvWritten)
+		for i := 0; i < cvFailed; i++ {
+			stats.RecordFailed()
+		}
 	}
 
 	if verbose {

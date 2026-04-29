@@ -204,6 +204,11 @@ func NormalizeToolCategory(rawName string) string {
 		if strings.Contains(rawName, "subagent") {
 			return "Task"
 		}
+		// Cursor vscdb stores MCP tool invocations with an
+		// "mcp-" prefix (e.g. "mcp-github", "mcp-linear-search").
+		if strings.HasPrefix(rawName, "mcp-") {
+			return "Tool"
+		}
 		return "Other"
 	}
 }
