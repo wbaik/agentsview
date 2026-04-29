@@ -4122,6 +4122,17 @@ func (e *Engine) SyncSingleSession(sessionID string) (err error) {
 		}
 	}
 
+	// Cursor sessions ingested from state.vscdb store a virtual
+	// file_path (state.vscdb#<id>) that won't os.Stat. Check for
+	// that case before FindSourceFile so explicit resync works
+	// even when no JSONL fallback exists for the session.
+	if def.Type == parser.AgentCursor {
+		stored := e.db.GetSessionFilePath(sessionID)
+		if parser.IsCursorVscdbVirtualPath(stored) {
+			return e.syncSingleCursorVscdb(sessionID)
+		}
+	}
+
 	path := e.FindSourceFile(sessionID)
 	if path == "" {
 		return fmt.Errorf(
@@ -4236,6 +4247,66 @@ func (e *Engine) SyncSingleSession(sessionID string) (err error) {
 		log.Printf("link subagent sessions: %v", err)
 	}
 
+	return nil
+}
+
+// syncSingleCursorVscdb re-syncs a single Cursor session from
+// the global state.vscdb. Used by SyncSingleSession when the
+// stored source path is a vscdb virtual path; without this,
+// explicit resync would fail for vscdb-only sessions because
+// FindSourceFile cannot map the virtual path back to a real
+// file.
+func (e *Engine) syncSingleCursorVscdb(sessionID string) error {
+	if e.cursorStateDB == "" {
+		return fmt.Errorf(
+			"cursor state.vscdb path not configured",
+		)
+	}
+	rawID := strings.TrimPrefix(sessionID, "cursor:")
+
+	metas, err := parser.ListCursorVscdbSessions(e.cursorStateDB)
+	if err != nil {
+		return fmt.Errorf(
+			"list cursor vscdb sessions: %w", err,
+		)
+	}
+
+	var meta *parser.CursorVscdbMeta
+	for i := range metas {
+		if metas[i].SessionID == rawID {
+			meta = &metas[i]
+			break
+		}
+	}
+	if meta == nil {
+		return fmt.Errorf(
+			"cursor session %s not found in vscdb", sessionID,
+		)
+	}
+
+	sess, msgs, err := parser.ParseCursorVscdbSession(
+		e.cursorStateDB, meta.SessionID,
+		meta.Project, e.machine,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"parse cursor vscdb session %s: %w",
+			sessionID, err,
+		)
+	}
+	if sess == nil {
+		return nil
+	}
+
+	if err := e.writeSessionFull(
+		pendingWrite{sess: *sess, msgs: msgs},
+	); err != nil && !errors.Is(err, db.ErrSessionExcluded) &&
+		!errors.Is(err, errSessionPreserved) {
+		return fmt.Errorf(
+			"write cursor vscdb session %s: %w",
+			sessionID, err,
+		)
+	}
 	return nil
 }
 

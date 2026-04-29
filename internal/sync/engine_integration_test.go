@@ -6339,6 +6339,99 @@ func TestSyncCursorVscdbChangeDetection(t *testing.T) {
 	}
 }
 
+// TestSyncSingleSessionCursorVscdbOnly verifies that an
+// explicit resync works for sessions that exist only in vscdb
+// (no discoverable JSONL fallback). Without the dispatch in
+// SyncSingleSession, FindSourceFile returns "" because the
+// stored virtual path fails os.Stat and no JSONL exists.
+func TestSyncSingleSessionCursorVscdbOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	database := dbtest.OpenTestDB(t)
+	dir := t.TempDir()
+	dbPath := filepath.Join(
+		dir, "globalStorage", "state.vscdb",
+	)
+	vscdb := createCursorVscdbHelper(t, dbPath)
+
+	sessionID := "vscdb-only-001"
+	vscdb.addSession(
+		t, sessionID, "Vscdb Only",
+		1704067200000, 1704067205000,
+		[]string{"u1", "a1"},
+	)
+	vscdb.addUserBubble(t, sessionID, "u1", "first message")
+	vscdb.addAssistantBubble(t, sessionID, "a1", "first reply")
+
+	engine := sync.NewEngine(database, sync.EngineConfig{
+		AgentDirs: map[parser.AgentType][]string{
+			parser.AgentCursor: {t.TempDir()},
+		},
+		Machine:       "local",
+		CursorStateDB: dbPath,
+	})
+
+	engine.SyncAll(context.Background(), nil)
+
+	avID := "cursor:" + sessionID
+	stored := database.GetSessionFilePath(avID)
+	if !parser.IsCursorVscdbVirtualPath(stored) {
+		t.Fatalf(
+			"setup: file_path = %q, want vscdb virtual path",
+			stored,
+		)
+	}
+	// No JSONL fallback exists — without the SyncSingleSession
+	// vscdb dispatch, FindSourceFile returns "" and resync
+	// fails with "source file not found".
+	if err := engine.SyncSingleSession(avID); err != nil {
+		t.Fatalf("SyncSingleSession: %v", err)
+	}
+	if storedAfter := database.GetSessionFilePath(avID); !parser.IsCursorVscdbVirtualPath(
+		storedAfter,
+	) {
+		t.Errorf(
+			"after resync: file_path = %q, want vscdb virtual path",
+			storedAfter,
+		)
+	}
+
+	// Mutate vscdb by re-inserting composerData with extra
+	// bubbles + a bumped lastUpdatedAt. cursorDiskKV uses
+	// UNIQUE ON CONFLICT REPLACE so the new row supersedes.
+	vscdb.addAssistantBubble(t, sessionID, "a2", "follow-up reply")
+	vscdb.addSession(
+		t, sessionID, "Vscdb Only",
+		1704067200000, 1704067210000,
+		[]string{"u1", "a1", "u1b", "a2"},
+	)
+	vscdb.addUserBubble(t, sessionID, "u1b", "follow-up question")
+
+	if err := engine.SyncSingleSession(avID); err != nil {
+		t.Fatalf("SyncSingleSession after mutation: %v", err)
+	}
+	msgs, err := database.GetMessages(
+		context.Background(), avID, 0, 100, true,
+	)
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+	foundFollowUp := false
+	for _, m := range msgs {
+		if strings.Contains(m.Content, "follow-up question") {
+			foundFollowUp = true
+			break
+		}
+	}
+	if !foundFollowUp {
+		t.Error(
+			"explicit resync did not pick up the new vscdb bubble",
+		)
+	}
+}
+
 // TestSyncCursorVscdbReparsesOnDataVersionBump verifies that
 // vscdb sessions get re-parsed when the stored data_version
 // falls behind db.CurrentDataVersion (e.g., after an agentsview
