@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -151,6 +152,64 @@ func TestGetSessionTiming_NoToolUseHasNoTurnDuration(t *testing.T) {
 	}
 	if got.TurnCount != 0 {
 		t.Errorf("TurnCount = %d, want 0", got.TurnCount)
+	}
+}
+
+func TestGetSessionTiming_MarshalsEmptyCollectionsAsArrays(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	timingInsertSession(t, d, "notool",
+		"2026-04-26T10:00:00Z", "2026-04-26T10:00:30Z")
+	timingInsertMessage(t, d, "notool", 0, "user",
+		"hi", "2026-04-26T10:00:00Z", false)
+	timingInsertMessage(t, d, "notool", 1, "assistant",
+		"hi back", "2026-04-26T10:00:01Z", false)
+
+	noTool, err := d.GetSessionTiming(ctx, "notool")
+	if err != nil {
+		t.Fatalf("GetSessionTiming(notool): %v", err)
+	}
+	if noTool.ByCategory == nil {
+		t.Fatal("ByCategory is nil, want empty slice")
+	}
+	if noTool.Turns == nil {
+		t.Fatal("Turns is nil, want empty slice")
+	}
+
+	timingInsertSession(t, d, "missing-calls",
+		"2026-04-26T10:00:00Z", "2026-04-26T10:00:30Z")
+	timingInsertMessage(t, d, "missing-calls", 0, "user",
+		"go", "2026-04-26T10:00:00Z", false)
+	timingInsertMessage(t, d, "missing-calls", 1, "assistant",
+		"legacy tool marker", "2026-04-26T10:00:01Z", true)
+	timingInsertMessage(t, d, "missing-calls", 2, "user",
+		"done", "2026-04-26T10:00:30Z", false)
+
+	missingCalls, err := d.GetSessionTiming(ctx, "missing-calls")
+	if err != nil {
+		t.Fatalf("GetSessionTiming(missing-calls): %v", err)
+	}
+	if len(missingCalls.Turns) != 1 {
+		t.Fatalf("len(Turns) = %d, want 1", len(missingCalls.Turns))
+	}
+	if missingCalls.Turns[0].Calls == nil {
+		t.Fatal("Turn Calls is nil, want empty slice")
+	}
+
+	payload, err := json.Marshal(missingCalls)
+	if err != nil {
+		t.Fatalf("Marshal timing: %v", err)
+	}
+	body := string(payload)
+	for _, field := range []string{
+		`"by_category":null`,
+		`"turns":null`,
+		`"calls":null`,
+	} {
+		if strings.Contains(body, field) {
+			t.Fatalf("timing JSON contains %s: %s", field, body)
+		}
 	}
 }
 

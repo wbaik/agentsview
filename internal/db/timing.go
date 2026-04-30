@@ -240,8 +240,10 @@ func AssembleTiming(
 	running := sess.EndedAt == nil || *sess.EndedAt == ""
 
 	out := &SessionTiming{
-		SessionID: sess.ID,
-		Running:   running,
+		SessionID:  sess.ID,
+		ByCategory: []CategoryTotal{},
+		Turns:      []TurnTiming{},
+		Running:    running,
 	}
 
 	switch {
@@ -281,6 +283,9 @@ func AssembleTiming(
 		}
 		out.TurnCount++
 		turnCalls := callsByMsg[t.MessageID]
+		if turnCalls == nil {
+			turnCalls = []CallTiming{}
+		}
 
 		for i := range turnCalls {
 			turnCalls[i].IsParallel = len(turnCalls) > 1
