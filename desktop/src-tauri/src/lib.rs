@@ -39,6 +39,15 @@ struct SidecarState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK 2.40+ DMABUF renderer aborts on some Linux EGL
+    // setups (NVIDIA, headless, certain Wayland sessions); fall
+    // back to the legacy compositing path unless the user opted
+    // out by setting the variable explicitly.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     let mut updater_builder = tauri_plugin_updater::Builder::new();
     // Override the placeholder pubkey from tauri.conf.json with
     // the real key when baked in at compile time via env var.
