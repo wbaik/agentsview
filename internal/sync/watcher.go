@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -103,6 +105,11 @@ func (w *Watcher) WatchRecursiveBudgeted(root string) RecursiveWatchResult {
 				}
 				if addErr := w.watcher.Add(path); addErr != nil {
 					result.Unwatched++
+					if isWatchResourceExhaustion(addErr) {
+						result.ResourceExhausted = true
+						result.ResourceExhaustedAt = path
+						return filepath.SkipAll
+					}
 				} else {
 					w.recursiveWatchBudget--
 					result.Watched++
@@ -110,7 +117,14 @@ func (w *Watcher) WatchRecursiveBudgeted(root string) RecursiveWatchResult {
 			}
 			return nil
 		})
+	if errors.Is(result.Err, filepath.SkipAll) {
+		result.Err = nil
+	}
 	return result
+}
+
+func isWatchResourceExhaustion(err error) bool {
+	return errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENOSPC)
 }
 
 // WatchShallow adds only the root directory to the watch list,

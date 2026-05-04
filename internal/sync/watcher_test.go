@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -377,6 +378,18 @@ func TestWatchRecursiveBudget_DegradesWhenBudgetExhausted(t *testing.T) {
 	}
 	if result.Unwatched == 0 {
 		t.Fatal("Unwatched = 0, want remaining directories counted")
+	}
+}
+
+func TestIsWatchResourceExhaustion(t *testing.T) {
+	if !isWatchResourceExhaustion(syscall.EMFILE) {
+		t.Fatal("EMFILE should be resource exhaustion")
+	}
+	if !isWatchResourceExhaustion(syscall.ENOSPC) {
+		t.Fatal("ENOSPC should be resource exhaustion")
+	}
+	if isWatchResourceExhaustion(os.ErrNotExist) {
+		t.Fatal("ErrNotExist should not be resource exhaustion")
 	}
 }
 
