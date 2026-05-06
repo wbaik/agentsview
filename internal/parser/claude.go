@@ -180,8 +180,9 @@ func ParseClaudeSession(
 			continue
 		}
 
-		// Extract cwd and gitBranch from user entries.
+		// Collect subagent links and cwd/gitBranch from user entries.
 		if entryType == "user" {
+			collectToolResultAgentID(line, subagentMap)
 			if cwd == "" {
 				cwd = gjson.Get(line, "cwd").Str
 			}
@@ -238,11 +239,12 @@ func ParseClaudeSession(
 		!gjson.Valid(lastLine) &&
 		!fileEndsWithNewline(f, info.Size())
 
-	// Collapse consecutive assistant entries that share the same
-	// message.id — these are streaming progress snapshots of a
-	// single response. Keep only the last entry per message.id
-	// run (it has the final content and token counts).
-	entries = collapseStreamingDuplicates(entries)
+	// Merge consecutive assistant entries that share the same
+	// message.id. Claude Code writes both cumulative streaming
+	// snapshots and additive chunks for one response under the same
+	// provider message id. Keep final metadata/token usage while
+	// preserving distinct content blocks from the whole run.
+	entries = mergeClaudeAssistantMessageChunks(entries)
 
 	fileInfo := FileInfo{
 		Path:  path,
@@ -332,6 +334,14 @@ var ErrDAGDetected = fmt.Errorf(
 	"incremental parse: DAG uuid detected",
 )
 
+// ErrClaudeIncrementalNeedsFullParse signals that appended Claude
+// lines contain content the incremental path cannot stitch into
+// already-stored rows (subagent linkage updates from
+// toolUseResult.agentId, or same-message.id chunk merging).
+var ErrClaudeIncrementalNeedsFullParse = fmt.Errorf(
+	"incremental parse: appended Claude lines require full parse",
+)
+
 func ParseClaudeSessionFrom(
 	path string,
 	offset int64,
@@ -396,6 +406,15 @@ func ParseClaudeSessionFrom(
 		return nil, time.Time{}, 0, ErrDAGDetected
 	}
 
+	// Subagent linkage updates (toolUseResult.agentId) and
+	// same-message.id chunk merging both need state the full
+	// parser builds across the whole file. Bail to a full parse
+	// when appended lines contain either.
+	if needsClaudeFullParse(entries) {
+		return nil, time.Time{}, 0,
+			ErrClaudeIncrementalNeedsFullParse
+	}
+
 	msgs, _, endedAt := extractMessagesFrom(
 		entries, startOrdinal,
 	)
@@ -416,6 +435,32 @@ func ParseClaudeSessionFrom(
 		endedAt = latestTS
 	}
 	return msgs, endedAt, consumed, nil
+}
+
+// needsClaudeFullParse returns true when appended entries contain
+// either a tool_result with toolUseResult.agentId (whose linkage
+// must update an already-stored tool_call row) or a consecutive
+// same-message.id assistant run (whose chunks the full parser
+// merges into one message). Both cases require a full re-parse.
+func needsClaudeFullParse(entries []dagEntry) bool {
+	var prevAssistantMID string
+	for _, e := range entries {
+		if e.entryType == "user" {
+			if gjson.Get(e.line, "toolUseResult.agentId").Str != "" {
+				return true
+			}
+		}
+		if e.entryType == "assistant" {
+			mid := gjson.Get(e.line, "message.id").Str
+			if mid != "" && mid == prevAssistantMID {
+				return true
+			}
+			prevAssistantMID = mid
+			continue
+		}
+		prevAssistantMID = ""
+	}
+	return false
 }
 
 // hasDAGFork returns true if the entries contain a fork —
@@ -804,6 +849,44 @@ func parseDAG(
 	return results, nil
 }
 
+func collectToolResultAgentID(line string, subagentMap map[string]string) {
+	agentID := gjson.Get(line, "toolUseResult.agentId").Str
+	if agentID == "" {
+		return
+	}
+	sessionID := agentID
+	if !strings.HasPrefix(sessionID, "agent-") {
+		sessionID = "agent-" + sessionID
+	}
+
+	content := gjson.Get(line, "message.content")
+	if !content.IsArray() {
+		return
+	}
+	var toolUseID string
+	content.ForEach(func(_, block gjson.Result) bool {
+		if block.Get("type").Str != "tool_result" {
+			return true
+		}
+		tuid := block.Get("tool_use_id").Str
+		if tuid == "" {
+			return true
+		}
+		if toolUseID != "" {
+			toolUseID = ""
+			return false
+		}
+		toolUseID = tuid
+		return true
+	})
+	if toolUseID == "" {
+		return
+	}
+	if _, exists := subagentMap[toolUseID]; !exists {
+		subagentMap[toolUseID] = sessionID
+	}
+}
+
 // extractQueuedCommand parses a Claude Code attachment entry and
 // returns the queued_command prompt if present. Other attachment
 // types (e.g. task_reminder) return ok=false. Whitespace-only or
@@ -917,12 +1000,12 @@ func queuedCommandMessage(
 	}
 }
 
-// collapseStreamingDuplicates removes consecutive assistant entries
-// that share the same message.id. Claude Code writes multiple JSONL
-// lines as a response streams — each has the same message.id but
-// progressively more output tokens. Only the last entry in each
-// same-message.id run has the final content and token counts.
-func collapseStreamingDuplicates(entries []dagEntry) []dagEntry {
+// mergeClaudeAssistantMessageChunks merges consecutive assistant
+// entries that share the same message.id. Claude Code uses this shape
+// both for cumulative streaming snapshots and for additive chunks of a
+// single response. The last entry owns metadata and token usage; the
+// merged message content keeps each distinct block in first-seen order.
+func mergeClaudeAssistantMessageChunks(entries []dagEntry) []dagEntry {
 	if len(entries) <= 1 {
 		return entries
 	}
@@ -933,24 +1016,189 @@ func collapseStreamingDuplicates(entries []dagEntry) []dagEntry {
 		if entries[i].entryType == "assistant" {
 			mid = gjson.Get(entries[i].line, "message.id").Str
 		}
-
-		// Look ahead: if next entries are assistant with same
-		// message.id, skip to the last one in the run.
-		if mid != "" {
-			j := i + 1
-			for j < len(entries) &&
-				entries[j].entryType == "assistant" &&
-				gjson.Get(entries[j].line, "message.id").Str == mid {
-				j++
-			}
-			// Keep only the last entry (j-1) in the run.
-			result = append(result, entries[j-1])
-			i = j - 1
-		} else {
+		if mid == "" {
 			result = append(result, entries[i])
+			continue
 		}
+
+		j := i + 1
+		for j < len(entries) &&
+			entries[j].entryType == "assistant" &&
+			gjson.Get(entries[j].line, "message.id").Str == mid {
+			j++
+		}
+		if j == i+1 {
+			result = append(result, entries[i])
+		} else {
+			result = append(result, mergeClaudeAssistantRun(entries[i:j]))
+		}
+		i = j - 1
 	}
 	return result
+}
+
+// mergeClaudeAssistantRun collapses one same-message.id assistant
+// run into a single dagEntry. For each snapshot in the run we decide
+// whether it is a cumulative continuation of the merged-so-far (its
+// leading blocks align by type, tool_use id, and text equal-or-prefix)
+// or an additive chunk (distinct new content). Cumulative snapshots
+// update overlapping positions in place and append any trailing blocks;
+// additive snapshots append blocks not already present.
+//
+// This avoids two failure modes of position-only or ordinal-only
+// matching: (1) treating distinct text blocks that happen to share a
+// byte prefix as one evolving block, and (2) collapsing additive
+// single-block chunks because they reuse the same ordinal.
+func mergeClaudeAssistantRun(run []dagEntry) dagEntry {
+	base := run[len(run)-1]
+	var merged []gjson.Result
+
+	for _, e := range run {
+		content := gjson.Get(e.line, "message.content")
+		if !content.IsArray() {
+			continue
+		}
+		merged = mergeClaudeSnapshot(merged, claudeContentBlocks(content))
+	}
+	if len(merged) == 0 {
+		return base
+	}
+	base.line = replaceClaudeMessageContent(base.line, merged)
+	return base
+}
+
+func claudeContentBlocks(content gjson.Result) []gjson.Result {
+	var blocks []gjson.Result
+	content.ForEach(func(_, b gjson.Result) bool {
+		if b.Raw != "" {
+			blocks = append(blocks, b)
+		}
+		return true
+	})
+	return blocks
+}
+
+func mergeClaudeSnapshot(
+	merged, snapshot []gjson.Result,
+) []gjson.Result {
+	if claudeSnapshotIsCumulative(merged, snapshot) {
+		for i, block := range snapshot {
+			if i < len(merged) {
+				merged[i] = pickClaudeLatestBlock(merged[i], block)
+				continue
+			}
+			merged = append(merged, block)
+		}
+		return merged
+	}
+	for _, block := range snapshot {
+		if !claudeBlockExistsIn(block, merged) {
+			merged = append(merged, block)
+		}
+	}
+	return merged
+}
+
+func claudeSnapshotIsCumulative(
+	merged, snapshot []gjson.Result,
+) bool {
+	if len(merged) == 0 || len(snapshot) == 0 {
+		return true
+	}
+	n := min(len(snapshot), len(merged))
+	for i := range n {
+		if !claudeBlocksAlign(merged[i], snapshot[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func claudeBlocksAlign(a, b gjson.Result) bool {
+	if a.Get("type").Str != b.Get("type").Str {
+		return false
+	}
+	switch a.Get("type").Str {
+	case "text":
+		ta := a.Get("text").Str
+		tb := b.Get("text").Str
+		return ta == tb ||
+			strings.HasPrefix(tb, ta) ||
+			strings.HasPrefix(ta, tb)
+	case "tool_use":
+		ida := a.Get("id").Str
+		idb := b.Get("id").Str
+		if ida != "" && idb != "" {
+			return ida == idb
+		}
+		return a.Raw == b.Raw
+	default:
+		return a.Raw == b.Raw
+	}
+}
+
+func pickClaudeLatestBlock(existing, candidate gjson.Result) gjson.Result {
+	if existing.Get("type").Str != candidate.Get("type").Str {
+		return candidate
+	}
+	switch existing.Get("type").Str {
+	case "text":
+		if len(candidate.Get("text").Str) >=
+			len(existing.Get("text").Str) {
+			return candidate
+		}
+		return existing
+	case "tool_use":
+		return candidate
+	default:
+		return existing
+	}
+}
+
+func claudeBlockExistsIn(
+	target gjson.Result, blocks []gjson.Result,
+) bool {
+	targetType := target.Get("type").Str
+	targetID := target.Get("id").Str
+	for _, b := range blocks {
+		if b.Get("type").Str != targetType {
+			continue
+		}
+		if targetType == "tool_use" && targetID != "" {
+			if b.Get("id").Str == targetID {
+				return true
+			}
+			continue
+		}
+		if b.Raw == target.Raw {
+			return true
+		}
+	}
+	return false
+}
+
+func replaceClaudeMessageContent(line string, blocks []gjson.Result) string {
+	var top map[string]any
+	if err := json.Unmarshal([]byte(line), &top); err != nil {
+		return line
+	}
+	msg, ok := top["message"].(map[string]any)
+	if !ok {
+		return line
+	}
+	content := make([]json.RawMessage, 0, len(blocks))
+	for _, block := range blocks {
+		if block.Raw == "" {
+			continue
+		}
+		content = append(content, json.RawMessage(block.Raw))
+	}
+	msg["content"] = content
+	encoded, err := json.Marshal(top)
+	if err != nil {
+		return line
+	}
+	return string(encoded)
 }
 
 // countUserTurns counts all user entries reachable from a

@@ -27,10 +27,19 @@ import (
 // trigger a non-destructive re-sync (mtime reset + skip cache
 // clear) so existing session data is preserved.
 //
-// Bumped to 25: Codex parser now also links codex_app subagents
+// Bumped to 26: Claude parser now (a) links Task / Agent tool
+// calls to child subagent sessions via toolUseResult.agentId
+// when queue/progress mappings are absent, populating
+// tool_calls.subagent_session_id, and (b) merges additive
+// same-message.id assistant chunks instead of keeping only the
+// last entry, preserving sibling tool_use blocks and
+// progressively-built text. Existing rows need re-parsing so
+// these linkages and merged content show up.
+//
+// (25: Codex parser now also links codex_app subagents
 // via collab_agent_spawn_end event_msgs, wait_agent function
 // calls, and agent_path subagent notifications. Existing rows
-// need re-parsing so codex_app subagent linkage works.
+// need re-parsing so codex_app subagent linkage works.)
 //
 // (24: Codex parser now annotates spawn_agent tool calls
 // with subagent_session_id once the spawned agent id is known.
@@ -68,7 +77,7 @@ import (
 //
 // (17: Codex <skill> template filtering.)
 // (16: <turn_aborted> system messages.)
-const dataVersion = 25
+const dataVersion = 26
 
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 

@@ -1315,9 +1315,10 @@ func ParseCodexSessionFrom(
 }
 
 // IsIncrementalFullParseFallback reports whether an incremental
-// Codex parse error requires the caller to fall back to a full parse.
+// parse error requires the caller to fall back to a full parse.
 func IsIncrementalFullParseFallback(err error) bool {
-	return errors.Is(err, errCodexIncrementalNeedsFullParse)
+	return errors.Is(err, errCodexIncrementalNeedsFullParse) ||
+		errors.Is(err, ErrClaudeIncrementalNeedsFullParse)
 }
 
 func isCodexSystemMessage(content string) bool {

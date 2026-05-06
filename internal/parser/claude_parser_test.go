@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -733,6 +734,129 @@ func TestParseClaudeSessionFrom_LinearUUID(
 	assert.False(t, endedAt.IsZero())
 }
 
+// Appended user entry carries toolUseResult.agentId, which the
+// incremental path can't propagate to an already-stored tool_call
+// row. ParseClaudeSessionFrom must signal full-parse fallback so
+// the engine re-parses the whole session.
+func TestParseClaudeSessionFrom_ToolUseResultAgentIDFallsBack(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	initial := testjsonl.JoinJSONL(
+		testjsonl.ClaudeUserJSON("hello", tsEarly),
+	)
+	path := createTestFile(
+		t, "inc-tool-result-agentid.jsonl", initial,
+	)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	offset := info.Size()
+
+	appended := `{"type":"user","uuid":"u1",` +
+		`"parentUuid":"pre",` +
+		`"timestamp":"` + tsEarlyS5 +
+		`","message":{"content":[` +
+		`{"type":"tool_result","tool_use_id":"toolu_x",` +
+		`"content":"done"}]},` +
+		`"toolUseResult":{"status":"completed",` +
+		`"agentId":"abc123"}}` + "\n"
+
+	f, err := os.OpenFile(
+		path, os.O_APPEND|os.O_WRONLY, 0o644,
+	)
+	require.NoError(t, err)
+	_, err = f.WriteString(appended)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	_, _, _, err = ParseClaudeSessionFrom(path, offset, 1)
+	assert.ErrorIs(t, err, ErrClaudeIncrementalNeedsFullParse)
+	assert.True(t, IsIncrementalFullParseFallback(err))
+}
+
+// Two appended assistant entries with the same message.id form a
+// run that the full parser merges into one message; the incremental
+// path would otherwise produce two separate stored messages, so it
+// must signal full-parse fallback.
+func TestParseClaudeSessionFrom_SameMessageIDFallsBack(t *testing.T) {
+	t.Parallel()
+
+	initial := testjsonl.JoinJSONL(
+		testjsonl.ClaudeUserJSON("hello", tsEarly),
+	)
+	path := createTestFile(
+		t, "inc-same-msgid.jsonl", initial,
+	)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	offset := info.Size()
+
+	a1 := `{"type":"assistant","uuid":"a1",` +
+		`"parentUuid":"pre",` +
+		`"timestamp":"` + tsEarlyS5 +
+		`","message":{"id":"msg_run","content":[` +
+		`{"type":"text","text":"Hi"}]}}` + "\n"
+	a2 := `{"type":"assistant","uuid":"a2",` +
+		`"parentUuid":"a1",` +
+		`"timestamp":"` + tsLate +
+		`","message":{"id":"msg_run","content":[` +
+		`{"type":"text","text":"Hi there"}]}}` + "\n"
+
+	f, err := os.OpenFile(
+		path, os.O_APPEND|os.O_WRONLY, 0o644,
+	)
+	require.NoError(t, err)
+	_, err = f.WriteString(a1 + a2)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	_, _, _, err = ParseClaudeSessionFrom(path, offset, 1)
+	assert.ErrorIs(t, err, ErrClaudeIncrementalNeedsFullParse)
+	assert.True(t, IsIncrementalFullParseFallback(err))
+}
+
+// Sanity: a benign incremental append (one user, one assistant
+// with a unique message.id, no toolUseResult.agentId) must NOT
+// trigger fallback.
+func TestParseClaudeSessionFrom_BenignAppendNoFallback(t *testing.T) {
+	t.Parallel()
+
+	initial := testjsonl.JoinJSONL(
+		testjsonl.ClaudeUserJSON("hello", tsEarly),
+	)
+	path := createTestFile(
+		t, "inc-benign.jsonl", initial,
+	)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	offset := info.Size()
+
+	u := `{"type":"user","uuid":"u1",` +
+		`"parentUuid":"pre",` +
+		`"timestamp":"` + tsEarlyS5 +
+		`","message":{"content":"more input"}}` + "\n"
+	a := `{"type":"assistant","uuid":"a1","parentUuid":"u1",` +
+		`"timestamp":"` + tsLate +
+		`","message":{"id":"msg_unique","content":[` +
+		`{"type":"text","text":"reply"}]}}` + "\n"
+
+	f, err := os.OpenFile(
+		path, os.O_APPEND|os.O_WRONLY, 0o644,
+	)
+	require.NoError(t, err)
+	_, err = f.WriteString(u + a)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	newMsgs, _, _, err := ParseClaudeSessionFrom(path, offset, 1)
+	require.NoError(t, err)
+	assert.Len(t, newMsgs, 2)
+}
+
 func TestParseClaudeSession_TerminationStatus(t *testing.T) {
 	t.Run("clean", func(t *testing.T) {
 		content := loadFixture(t, "claude/valid_session.jsonl")
@@ -982,6 +1106,107 @@ func TestParseClaudeSession_ExtractsMessageIDAndRequestID(t *testing.T) {
 	if m.OutputTokens != 20 {
 		t.Errorf("OutputTokens = %d, want 20", m.OutputTokens)
 	}
+}
+
+func TestParseClaudeSession_SameMessageIDStreamingSnapshots(t *testing.T) {
+	lines := []string{
+		`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"hello"},"cwd":"/tmp"}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"a1","parentUuid":"u1","message":{"id":"msg_stream","content":[{"type":"text","text":"Work"}],"usage":{"input_tokens":1,"output_tokens":1},"stop_reason":"tool_use"}}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:02Z","uuid":"a2","parentUuid":"a1","message":{"id":"msg_stream","content":[{"type":"text","text":"Working"},{"type":"tool_use","id":"toolu_same","name":"Agent","input":{"description":"same","subagent_type":"Explore","prompt":"same"}}],"usage":{"input_tokens":1,"output_tokens":2},"stop_reason":"tool_use"}}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:03Z","uuid":"a3","parentUuid":"a2","message":{"id":"msg_stream","content":[{"type":"text","text":"Working"},{"type":"tool_use","id":"toolu_same","name":"Agent","input":{"description":"same","subagent_type":"Explore","prompt":"same"}}],"usage":{"input_tokens":1,"output_tokens":3},"stop_reason":"tool_use"}}`,
+	}
+
+	_, msgs := runClaudeParserTest(
+		t, "same-message-streaming.jsonl", testjsonl.JoinJSONL(lines...),
+	)
+
+	require.Len(t, msgs, 2)
+	msg := msgs[1]
+	assert.Equal(t, "Working\n[Task: same (Explore)]", msg.Content)
+	assert.Equal(t, 3, msg.OutputTokens)
+	assert.Len(t, msg.ToolCalls, 1)
+	assert.Equal(t, "toolu_same", msg.ToolCalls[0].ToolUseID)
+}
+
+// Cumulative snapshots where the same tool_use id appears with
+// progressively more complete input JSON across snapshots. Without
+// id-keyed dedup these would each be a distinct raw block and produce
+// duplicate tool calls; the latest snapshot must win.
+func TestParseClaudeSession_SameMessageIDProgressiveToolUseInput(t *testing.T) {
+	lines := []string{
+		`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"hello"},"cwd":"/tmp"}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"a1","parentUuid":"u1","message":{"id":"msg_grow","content":[{"type":"text","text":"Work"},{"type":"tool_use","id":"toolu_grow","name":"Agent","input":{"description":"insp"}}],"usage":{"input_tokens":1,"output_tokens":1},"stop_reason":"tool_use"}}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:02Z","uuid":"a2","parentUuid":"a1","message":{"id":"msg_grow","content":[{"type":"text","text":"Working"},{"type":"tool_use","id":"toolu_grow","name":"Agent","input":{"description":"inspect","subagent_type":"Explore"}}],"usage":{"input_tokens":1,"output_tokens":2},"stop_reason":"tool_use"}}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:03Z","uuid":"a3","parentUuid":"a2","message":{"id":"msg_grow","content":[{"type":"text","text":"Working on it"},{"type":"tool_use","id":"toolu_grow","name":"Agent","input":{"description":"inspect schema","subagent_type":"Explore","prompt":"inspect the schema"}}],"usage":{"input_tokens":1,"output_tokens":3},"stop_reason":"tool_use"}}`,
+	}
+
+	_, msgs := runClaudeParserTest(
+		t, "progressive-tool-input.jsonl", testjsonl.JoinJSONL(lines...),
+	)
+
+	require.Len(t, msgs, 2)
+	msg := msgs[1]
+	require.Len(t, msg.ToolCalls, 1)
+	tc := msg.ToolCalls[0]
+	assert.Equal(t, "toolu_grow", tc.ToolUseID)
+	assert.JSONEq(t, `{"description":"inspect schema","subagent_type":"Explore","prompt":"inspect the schema"}`, tc.InputJSON)
+	assert.Equal(t, 3, msg.OutputTokens)
+	assert.Contains(t, msg.Content, "Working on it")
+}
+
+// Additive same-message.id chunks where each chunk has one distinct
+// text block. Ordinal-only matching would have collapsed all three
+// to whichever was longest; cumulative-vs-additive detection sees
+// that each chunk fails the leading-block alignment check and
+// appends them as distinct content.
+func TestParseClaudeSession_SameMessageIDAdditiveDistinctTextBlocks(t *testing.T) {
+	lines := []string{
+		`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"hello"},"cwd":"/tmp"}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"a1","parentUuid":"u1","message":{"id":"msg_add","content":[{"type":"text","text":"First sentence."}],"usage":{"input_tokens":1,"output_tokens":1},"stop_reason":"end_turn"}}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:02Z","uuid":"a2","parentUuid":"a1","message":{"id":"msg_add","content":[{"type":"text","text":"Second sentence."}],"usage":{"input_tokens":1,"output_tokens":2},"stop_reason":"end_turn"}}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:03Z","uuid":"a3","parentUuid":"a2","message":{"id":"msg_add","content":[{"type":"text","text":"Third sentence."}],"usage":{"input_tokens":1,"output_tokens":3},"stop_reason":"end_turn"}}`,
+	}
+
+	_, msgs := runClaudeParserTest(
+		t, "additive-distinct-text.jsonl", testjsonl.JoinJSONL(lines...),
+	)
+
+	require.Len(t, msgs, 2)
+	msg := msgs[1]
+	require.Equal(t, RoleAssistant, msg.Role)
+	assert.Contains(t, msg.Content, "First sentence.")
+	assert.Contains(t, msg.Content, "Second sentence.")
+	assert.Contains(t, msg.Content, "Third sentence.")
+}
+
+// Cumulative streaming snapshots of one response that contains
+// text + tool_use + text. The third block in the second snapshot
+// happens to start with the first text block's exact bytes. Snapshot-
+// level cumulative detection keeps both text blocks separately; the
+// prior prefix heuristic would have collapsed the pre-tool intro into
+// the post-tool follow-up.
+func TestParseClaudeSession_SameMessageIDPrefixCollidingTextBlocks(t *testing.T) {
+	lines := []string{
+		`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"hello"},"cwd":"/tmp"}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"a1","parentUuid":"u1","message":{"id":"msg_prefix","content":[{"type":"text","text":"Looking at this"},{"type":"tool_use","id":"toolu_one","name":"Read","input":{"file_path":"/tmp/foo.txt"}}],"usage":{"input_tokens":1,"output_tokens":1},"stop_reason":"tool_use"}}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:02Z","uuid":"a2","parentUuid":"a1","message":{"id":"msg_prefix","content":[{"type":"text","text":"Looking at this"},{"type":"tool_use","id":"toolu_one","name":"Read","input":{"file_path":"/tmp/foo.txt"}},{"type":"text","text":"Looking at this code carefully."}],"usage":{"input_tokens":1,"output_tokens":2},"stop_reason":"end_turn"}}`,
+	}
+
+	_, msgs := runClaudeParserTest(
+		t, "prefix-colliding-text.jsonl", testjsonl.JoinJSONL(lines...),
+	)
+
+	require.Len(t, msgs, 2)
+	msg := msgs[1]
+	require.Equal(t, RoleAssistant, msg.Role)
+	// Both distinct text blocks must survive — the second is
+	// post-tool follow-up, not a streaming continuation of the first.
+	assert.Equal(t, 2, strings.Count(msg.Content, "Looking at this"),
+		"both distinct text blocks should appear in merged content; got %q",
+		msg.Content)
+	assert.Contains(t, msg.Content, "Looking at this code carefully.")
+	require.Len(t, msg.ToolCalls, 1)
+	assert.Equal(t, "toolu_one", msg.ToolCalls[0].ToolUseID)
 }
 
 func TestParseClaudeSession_CompactBoundary(t *testing.T) {

@@ -1396,6 +1396,134 @@ func TestSyncSubagentSetsParentSessionID(t *testing.T) {
 	}
 }
 
+func TestSyncClaudeToolResultAgentIDLinksSubagentToolCall(t *testing.T) {
+	env := setupTestEnv(t)
+
+	parentContent := strings.Join([]string{
+		`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"Build the feature"},"cwd":"/tmp"}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"u2","parentUuid":"u1","message":{"content":[{"type":"tool_use","id":"toolu_agent_result","name":"Agent","input":{"description":"inspect schema","subagent_type":"Explore","prompt":"inspect the schema"}}]}}`,
+		`{"type":"user","timestamp":"2024-01-01T10:00:05Z","uuid":"u3","parentUuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_agent_result","content":"done"}]},"toolUseResult":{"status":"completed","agentId":"abc123def4567890"}}`,
+	}, "\n")
+
+	env.writeClaudeSession(
+		t, "test-proj", "parent-agentid.jsonl", parentContent,
+	)
+
+	subContent := testjsonl.NewSessionBuilder().
+		AddClaudeUserWithSessionID(
+			tsEarly, "Do subtask", "parent-agentid",
+		).
+		AddClaudeAssistant(tsEarlyS5, "Subtask done.").
+		String()
+
+	env.writeSession(
+		t, env.claudeDir,
+		filepath.Join(
+			"test-proj", "parent-agentid",
+			"subagents", "agent-abc123def4567890.jsonl",
+		),
+		subContent,
+	)
+
+	runSyncAndAssert(t, env.engine, sync.SyncStats{TotalSessions: 2, Synced: 2, Skipped: 0})
+
+	var got string
+	err := env.db.Reader().QueryRow(`
+		SELECT subagent_session_id
+		FROM tool_calls
+		WHERE session_id = ? AND tool_use_id = ?`,
+		"parent-agentid", "toolu_agent_result",
+	).Scan(&got)
+	if err != nil {
+		t.Fatalf("query linked subagent tool call: %v", err)
+	}
+	if got != "agent-abc123def4567890" {
+		t.Errorf(
+			"subagent_session_id = %q, want %q",
+			got, "agent-abc123def4567890",
+		)
+	}
+}
+
+func TestSyncClaudeSameMessageIDAgentChunksLinkAllSubagents(t *testing.T) {
+	env := setupTestEnv(t)
+
+	parentContent := strings.Join([]string{
+		`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"summarize with subagents"},"cwd":"/tmp"}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"a1","parentUuid":"u1","message":{"id":"msg_same","content":[{"type":"text","text":"Launching agents."}],"usage":{"input_tokens":1,"output_tokens":1},"stop_reason":"tool_use"}}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:02Z","uuid":"a2","parentUuid":"a1","message":{"id":"msg_same","content":[{"type":"tool_use","id":"toolu_first","name":"Agent","input":{"description":"first","subagent_type":"Explore","prompt":"first"}}],"usage":{"input_tokens":1,"output_tokens":2},"stop_reason":"tool_use"}}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:03Z","uuid":"a3","parentUuid":"a2","message":{"id":"msg_same","content":[{"type":"tool_use","id":"toolu_second","name":"Agent","input":{"description":"second","subagent_type":"Explore","prompt":"second"}}],"usage":{"input_tokens":1,"output_tokens":3},"stop_reason":"tool_use"}}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:04Z","uuid":"a4","parentUuid":"a3","message":{"id":"msg_same","content":[{"type":"tool_use","id":"toolu_third","name":"Agent","input":{"description":"third","subagent_type":"Explore","prompt":"third"}}],"usage":{"input_tokens":1,"output_tokens":4},"stop_reason":"tool_use"}}`,
+		`{"type":"user","timestamp":"2024-01-01T10:00:05Z","uuid":"r1","parentUuid":"a2","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_first","content":"done first"}]},"toolUseResult":{"status":"completed","agentId":"childfirst"}}`,
+		`{"type":"user","timestamp":"2024-01-01T10:00:06Z","uuid":"r2","parentUuid":"a3","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_second","content":"done second"}]},"toolUseResult":{"status":"completed","agentId":"childsecond"}}`,
+		`{"type":"user","timestamp":"2024-01-01T10:00:07Z","uuid":"r3","parentUuid":"a4","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_third","content":"done third"}]},"toolUseResult":{"status":"completed","agentId":"childthird"}}`,
+	}, "\n")
+
+	env.writeClaudeSession(
+		t, "test-proj", "parent-same-message.jsonl", parentContent,
+	)
+
+	for _, child := range []string{"childfirst", "childsecond", "childthird"} {
+		subContent := testjsonl.NewSessionBuilder().
+			AddClaudeUserWithSessionID(
+				tsEarly, "Do "+child, "parent-same-message",
+			).
+			AddClaudeAssistant(tsEarlyS5, child+" done.").
+			String()
+		env.writeSession(
+			t, env.claudeDir,
+			filepath.Join(
+				"test-proj", "parent-same-message",
+				"subagents", "agent-"+child+".jsonl",
+			),
+			subContent,
+		)
+	}
+
+	runSyncAndAssert(t, env.engine, sync.SyncStats{TotalSessions: 4, Synced: 4, Skipped: 0})
+
+	rows, err := env.db.Reader().Query(`
+		SELECT tool_use_id, subagent_session_id
+		FROM tool_calls
+		WHERE session_id = ?
+		ORDER BY tool_use_id`,
+		"parent-same-message",
+	)
+	if err != nil {
+		t.Fatalf("query linked subagent tool calls: %v", err)
+	}
+	defer rows.Close()
+
+	got := map[string]string{}
+	for rows.Next() {
+		var toolUseID, subagentSessionID string
+		if err := rows.Scan(&toolUseID, &subagentSessionID); err != nil {
+			t.Fatalf("scan linked subagent tool call: %v", err)
+		}
+		got[toolUseID] = subagentSessionID
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate linked subagent tool calls: %v", err)
+	}
+
+	want := map[string]string{
+		"toolu_first":  "agent-childfirst",
+		"toolu_second": "agent-childsecond",
+		"toolu_third":  "agent-childthird",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("linked tool calls = %v, want %v", got, want)
+	}
+	for toolUseID, wantSessionID := range want {
+		if got[toolUseID] != wantSessionID {
+			t.Errorf(
+				"%s subagent_session_id = %q, want %q",
+				toolUseID, got[toolUseID], wantSessionID,
+			)
+		}
+	}
+}
+
 func TestSyncPathsClaudeSubagent(t *testing.T) {
 	env := setupTestEnv(t)
 
