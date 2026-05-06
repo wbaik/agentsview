@@ -1227,6 +1227,32 @@ func TestParseClaudeSession_SameMessageIDStreamingSingleBlockReplaces(t *testing
 	assert.Equal(t, "Hello world", msg.Content)
 }
 
+// Same-message.id chunk merging round-trips the base entry's JSON
+// through Unmarshal/Marshal to swap in the merged content blocks.
+// json.Unmarshal decodes numbers as float64 by default, which
+// truncates integers larger than 2^53. Use json.Decoder.UseNumber
+// to preserve the raw textual form so large integer fields (e.g.
+// future large token-count metrics) survive the merge.
+func TestParseClaudeSession_SameMessageIDPreservesLargeIntegers(t *testing.T) {
+	// 9999999999999999 > 2^53 — float64 cannot represent it exactly.
+	const bigInt = "9999999999999999"
+	lines := []string{
+		`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"hello"},"cwd":"/tmp"}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"a1","parentUuid":"u1","message":{"id":"msg_big","content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":` + bigInt + `},"stop_reason":"tool_use"}}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:02Z","uuid":"a2","parentUuid":"a1","message":{"id":"msg_big","content":[{"type":"text","text":"Hi there"}],"usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":` + bigInt + `},"stop_reason":"end_turn"}}`,
+	}
+
+	_, msgs := runClaudeParserTest(
+		t, "big-int.jsonl", testjsonl.JoinJSONL(lines...),
+	)
+	require.Len(t, msgs, 2)
+	assert.Contains(
+		t, string(msgs[1].TokenUsage), bigInt,
+		"large integer in usage must survive the merge "+
+			"round-trip; got %s", string(msgs[1].TokenUsage),
+	)
+}
+
 // Cumulative streaming snapshots of one response that contains
 // text + tool_use + text. The third block in the second snapshot
 // happens to start with the first text block's exact bytes. Snapshot-

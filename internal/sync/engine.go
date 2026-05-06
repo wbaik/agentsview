@@ -2455,7 +2455,14 @@ func (e *Engine) tryIncrementalJSONL(
 				"incremental %s %s: %v (explicit full parse fallback)",
 				agent, file.Path, err,
 			)
-			return processResult{}, false
+			// The fallback fires when appended lines update
+			// already-stored rows (toolUseResult.agentId
+			// linkage, same-message.id chunk merging). The
+			// full parse must replace existing messages —
+			// otherwise the append-only write path skips
+			// rows whose ordinal ≤ maxOrd and the updates
+			// are silently dropped.
+			return processResult{forceReplace: true}, false
 		}
 		log.Printf(
 			"incremental %s %s: %v (full parse)",

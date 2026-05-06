@@ -1188,8 +1188,13 @@ func claudeBlockExistsIn(
 }
 
 func replaceClaudeMessageContent(line string, blocks []gjson.Result) string {
+	// UseNumber preserves the raw textual form of JSON numbers so
+	// re-marshaling doesn't truncate large integers (e.g. usage
+	// token counts) or change scientific notation.
+	dec := json.NewDecoder(strings.NewReader(line))
+	dec.UseNumber()
 	var top map[string]any
-	if err := json.Unmarshal([]byte(line), &top); err != nil {
+	if err := dec.Decode(&top); err != nil {
 		return line
 	}
 	msg, ok := top["message"].(map[string]any)

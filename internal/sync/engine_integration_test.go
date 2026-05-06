@@ -5783,6 +5783,93 @@ func TestIncrementalSync_ClaudeMidStreamSplitFallsBackToFullParse(t *testing.T) 
 	}
 }
 
+// TestIncrementalSync_ClaudeAgentIDFallbackUpdatesStoredToolCall covers
+// the cross-sync subagent linkage case: the first sync stores an
+// assistant tool_use row with no subagent_session_id, and a later sync
+// appends a tool_result whose toolUseResult.agentId should populate the
+// already-stored tool_call. The parser signals
+// IsIncrementalFullParseFallback, so the full-parse fallback must run
+// with forceReplace=true; otherwise the append-only write path skips
+// the existing row and the linkage is silently dropped.
+func TestIncrementalSync_ClaudeAgentIDFallbackUpdatesStoredToolCall(t *testing.T) {
+	env := setupTestEnv(t)
+
+	parentInitial := testjsonl.JoinJSONL(
+		`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"go"},"cwd":"/tmp"}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"a1","parentUuid":"u1","message":{"id":"msg_one","content":[{"type":"tool_use","id":"toolu_late","name":"Agent","input":{"description":"d","subagent_type":"Explore","prompt":"p"}}],"usage":{"input_tokens":1,"output_tokens":1},"stop_reason":"tool_use"}}`,
+	)
+
+	path := env.writeClaudeSession(
+		t, "proj-late-link", "parent-late-link.jsonl", parentInitial,
+	)
+
+	subContent := testjsonl.NewSessionBuilder().
+		AddClaudeUserWithSessionID(
+			tsEarly, "do thing", "parent-late-link",
+		).
+		AddClaudeAssistant(tsEarlyS5, "done").
+		String()
+	env.writeSession(
+		t, env.claudeDir,
+		filepath.Join(
+			"proj-late-link", "parent-late-link",
+			"subagents", "agent-childlate.jsonl",
+		),
+		subContent,
+	)
+
+	env.engine.SyncAll(context.Background(), nil)
+
+	// Linkage starts empty (the toolUseResult hasn't appeared yet).
+	var got sql.NullString
+	if err := env.db.Reader().QueryRow(`
+		SELECT subagent_session_id
+		FROM tool_calls
+		WHERE session_id = ? AND tool_use_id = ?`,
+		"parent-late-link", "toolu_late",
+	).Scan(&got); err != nil {
+		t.Fatalf("query before append: %v", err)
+	}
+	if got.Valid && got.String != "" {
+		t.Fatalf(
+			"subagent_session_id = %q before tool_result, want empty",
+			got.String,
+		)
+	}
+
+	// Append a tool_result with toolUseResult.agentId pointing at
+	// the existing subagent session. Incremental parse will return
+	// ErrClaudeIncrementalNeedsFullParse so the engine must full-
+	// parse with forceReplace to update the stored tool_call row.
+	toolResult := `{"type":"user","timestamp":"2024-01-01T10:00:02Z","uuid":"r1","parentUuid":"a1","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_late","content":"done"}]},"toolUseResult":{"status":"completed","agentId":"childlate"}}`
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open for append: %v", err)
+	}
+	if _, err := f.WriteString(toolResult + "\n"); err != nil {
+		f.Close()
+		t.Fatalf("append: %v", err)
+	}
+	f.Close()
+
+	env.engine.SyncPaths([]string{path})
+
+	if err := env.db.Reader().QueryRow(`
+		SELECT subagent_session_id
+		FROM tool_calls
+		WHERE session_id = ? AND tool_use_id = ?`,
+		"parent-late-link", "toolu_late",
+	).Scan(&got); err != nil {
+		t.Fatalf("query after append: %v", err)
+	}
+	if got.String != "agent-childlate" {
+		t.Errorf(
+			"subagent_session_id = %q, want %q",
+			got.String, "agent-childlate",
+		)
+	}
+}
+
 func TestIncrementalSync_CodexAppend(t *testing.T) {
 	env := setupTestEnv(t)
 
