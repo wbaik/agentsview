@@ -1180,10 +1180,11 @@ func TestParseClaudeSession_SameMessageIDAdditiveDistinctTextBlocks(t *testing.T
 }
 
 // Two single-text-block additive chunks where the second's text
-// begins byte-for-byte with the first. Without strict alignment
-// for single-block snapshots, the prefix relationship would be
-// classified as cumulative growth and the first block would be
-// overwritten by the second.
+// begins byte-for-byte with the first AND the first chunk's
+// stop_reason="end_turn" marks the message as already terminated.
+// Subsequent same-message.id chunks are additive rather than
+// streaming snapshots, so the prefix relationship must NOT be
+// classified as cumulative growth.
 func TestParseClaudeSession_SameMessageIDAdditivePrefixCollidingSingleBlocks(t *testing.T) {
 	lines := []string{
 		`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"hello"},"cwd":"/tmp"}`,
@@ -1200,6 +1201,30 @@ func TestParseClaudeSession_SameMessageIDAdditivePrefixCollidingSingleBlocks(t *
 	require.Equal(t, RoleAssistant, msg.Role)
 	assert.Contains(t, msg.Content, "First.")
 	assert.Contains(t, msg.Content, "First. Continued.")
+}
+
+// Two single-text-block snapshots where the second extends the
+// first as a byte-for-byte prefix and neither has finalized the
+// message (no stop_reason="end_turn" in the first snapshot). The
+// merge must treat this as cumulative streaming and REPLACE the
+// partial snapshot — not concatenate as additive content.
+func TestParseClaudeSession_SameMessageIDStreamingSingleBlockReplaces(t *testing.T) {
+	lines := []string{
+		`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"hello"},"cwd":"/tmp"}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"a1","parentUuid":"u1","message":{"id":"msg_partial","content":[{"type":"text","text":"Hello"}],"usage":{"input_tokens":1,"output_tokens":1},"stop_reason":"tool_use"}}`,
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:02Z","uuid":"a2","parentUuid":"a1","message":{"id":"msg_partial","content":[{"type":"text","text":"Hello world"}],"usage":{"input_tokens":1,"output_tokens":2},"stop_reason":"end_turn"}}`,
+	}
+
+	_, msgs := runClaudeParserTest(
+		t, "streaming-single-block.jsonl", testjsonl.JoinJSONL(lines...),
+	)
+
+	require.Len(t, msgs, 2)
+	msg := msgs[1]
+	require.Equal(t, RoleAssistant, msg.Role)
+	// Exact equality: the partial "Hello" must be replaced by the
+	// final "Hello world", not joined as "Hello\nHello world".
+	assert.Equal(t, "Hello world", msg.Content)
 }
 
 // Cumulative streaming snapshots of one response that contains

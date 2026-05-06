@@ -1045,20 +1045,30 @@ func mergeClaudeAssistantMessageChunks(entries []dagEntry) []dagEntry {
 // update overlapping positions in place and append any trailing blocks;
 // additive snapshots append blocks not already present.
 //
-// This avoids two failure modes of position-only or ordinal-only
-// matching: (1) treating distinct text blocks that happen to share a
-// byte prefix as one evolving block, and (2) collapsing additive
-// single-block chunks because they reuse the same ordinal.
+// Once any entry in the run has stop_reason="end_turn", the message
+// has terminated; subsequent same-message.id entries are treated as
+// additive distinct chunks rather than streaming snapshots, even if
+// their text would otherwise prefix-match.
 func mergeClaudeAssistantRun(run []dagEntry) dagEntry {
 	base := run[len(run)-1]
 	var merged []gjson.Result
+	// Once a snapshot in the run has stop_reason="end_turn" the
+	// message has terminated. Any further same-message.id entries
+	// are additive distinct chunks rather than streaming snapshots,
+	// so cumulative prefix-matching must be skipped.
+	runEnded := false
 
 	for _, e := range run {
 		content := gjson.Get(e.line, "message.content")
 		if !content.IsArray() {
 			continue
 		}
-		merged = mergeClaudeSnapshot(merged, claudeContentBlocks(content))
+		merged = mergeClaudeSnapshot(
+			merged, claudeContentBlocks(content), runEnded,
+		)
+		if gjson.Get(e.line, "message.stop_reason").Str == "end_turn" {
+			runEnded = true
+		}
 	}
 	if len(merged) == 0 {
 		return base
@@ -1079,9 +1089,9 @@ func claudeContentBlocks(content gjson.Result) []gjson.Result {
 }
 
 func mergeClaudeSnapshot(
-	merged, snapshot []gjson.Result,
+	merged, snapshot []gjson.Result, runEnded bool,
 ) []gjson.Result {
-	if claudeSnapshotIsCumulative(merged, snapshot) {
+	if !runEnded && claudeSnapshotIsCumulative(merged, snapshot) {
 		for i, block := range snapshot {
 			if i < len(merged) {
 				merged[i] = pickClaudeLatestBlock(merged[i], block)
@@ -1105,16 +1115,6 @@ func claudeSnapshotIsCumulative(
 	if len(merged) == 0 || len(snapshot) == 0 {
 		return true
 	}
-	// Single-block snapshots have no structural backup beyond a
-	// coincidental text prefix. Two distinct additive text chunks
-	// where the second begins with the first byte-for-byte would
-	// otherwise be classified as cumulative growth and collapsed.
-	// Require exact-equal alignment in that case; multi-block
-	// snapshots can rely on prefix matching because additional
-	// aligned blocks supply structural evidence.
-	if len(snapshot) == 1 {
-		return claudeBlocksAlignStrict(merged[0], snapshot[0])
-	}
 	n := min(len(snapshot), len(merged))
 	for i := range n {
 		if !claudeBlocksAlign(merged[i], snapshot[i]) {
@@ -1135,29 +1135,6 @@ func claudeBlocksAlign(a, b gjson.Result) bool {
 		return ta == tb ||
 			strings.HasPrefix(tb, ta) ||
 			strings.HasPrefix(ta, tb)
-	case "tool_use":
-		ida := a.Get("id").Str
-		idb := b.Get("id").Str
-		if ida != "" && idb != "" {
-			return ida == idb
-		}
-		return a.Raw == b.Raw
-	default:
-		return a.Raw == b.Raw
-	}
-}
-
-// claudeBlocksAlignStrict is like claudeBlocksAlign but rejects
-// text prefix matches — only exact text equality counts. Tool_use
-// blocks still align by id (cumulative growth of input is fine
-// because the id ties them to one logical call).
-func claudeBlocksAlignStrict(a, b gjson.Result) bool {
-	if a.Get("type").Str != b.Get("type").Str {
-		return false
-	}
-	switch a.Get("type").Str {
-	case "text":
-		return a.Get("text").Str == b.Get("text").Str
 	case "tool_use":
 		ida := a.Get("id").Str
 		idb := b.Get("id").Str

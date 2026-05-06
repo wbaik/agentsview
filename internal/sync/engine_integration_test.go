@@ -5773,9 +5773,11 @@ func TestIncrementalSync_ClaudeMidStreamSplitFallsBackToFullParse(t *testing.T) 
 	if string(msgs[1].Role) != "assistant" {
 		t.Fatalf("msgs[1].Role = %q, want assistant", msgs[1].Role)
 	}
-	if !strings.Contains(msgs[1].Content, "Hello world") {
+	// The partial snapshot ("Hello") must be REPLACED by the final
+	// snapshot ("Hello world"), not concatenated as additive content.
+	if msgs[1].Content != "Hello world" {
 		t.Errorf(
-			"msgs[1].Content = %q, want it to contain %q",
+			"msgs[1].Content = %q, want exactly %q",
 			msgs[1].Content, "Hello world",
 		)
 	}
