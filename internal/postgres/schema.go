@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS messages (
     role           TEXT NOT NULL,
     content        TEXT NOT NULL,
     thinking_text  TEXT NOT NULL DEFAULT '',
+    phase          TEXT NOT NULL DEFAULT '',
+    memory_citation_json TEXT NOT NULL DEFAULT '',
     timestamp      TIMESTAMPTZ,
     has_thinking   BOOLEAN NOT NULL DEFAULT FALSE,
     has_tool_use   BOOLEAN NOT NULL DEFAULT FALSE,
@@ -294,6 +296,16 @@ func EnsureSchema(
 			"messages", "claude_request_id",
 			`claude_request_id TEXT NOT NULL DEFAULT ''`,
 			"adding messages.claude_request_id",
+		},
+		{
+			"messages", "phase",
+			`phase TEXT NOT NULL DEFAULT ''`,
+			"adding messages.phase",
+		},
+		{
+			"messages", "memory_citation_json",
+			`memory_citation_json TEXT NOT NULL DEFAULT ''`,
+			"adding messages.memory_citation_json",
 		},
 		{
 			"tool_calls", "call_index",

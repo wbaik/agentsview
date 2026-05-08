@@ -2,6 +2,7 @@ package importer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -219,10 +220,14 @@ func upsertConversation(
 	msgs := make([]db.Message, len(result.Messages))
 	for i, m := range result.Messages {
 		msgs[i] = db.Message{
-			SessionID:     s.ID,
-			Ordinal:       m.Ordinal,
-			Role:          string(m.Role),
-			Content:       m.Content,
+			SessionID: s.ID,
+			Ordinal:   m.Ordinal,
+			Role:      string(m.Role),
+			Content:   m.Content,
+			Phase:     m.Phase,
+			MemoryCitationJSON: memoryCitationJSON(
+				m.MemoryCitation,
+			),
 			Timestamp:     m.Timestamp.UTC().Format(time.RFC3339Nano),
 			ContentLength: m.ContentLength,
 		}
@@ -340,6 +345,10 @@ func ImportChatGPT(
 					Ordinal:   m.Ordinal,
 					Role:      string(m.Role),
 					Content:   m.Content,
+					Phase:     m.Phase,
+					MemoryCitationJSON: memoryCitationJSON(
+						m.MemoryCitation,
+					),
 					Timestamp: m.Timestamp.UTC().Format(
 						time.RFC3339Nano,
 					),
@@ -399,6 +408,25 @@ func timeStr(t time.Time) *string {
 	}
 	s := t.UTC().Format(time.RFC3339Nano)
 	return &s
+}
+
+func memoryCitationJSON(
+	citation *parser.ParsedMemoryCitation,
+) string {
+	if citation == nil {
+		return ""
+	}
+	if citation.Entries == nil {
+		citation.Entries = []parser.ParsedMemoryCitationEntry{}
+	}
+	if citation.RolloutIDs == nil {
+		citation.RolloutIDs = []string{}
+	}
+	b, err := json.Marshal(citation)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func convertToolCalls(

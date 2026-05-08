@@ -1144,6 +1144,7 @@ func pgMessageTokenFingerprint(
 		`SELECT ordinal, model, token_usage, context_tokens,
 			output_tokens, has_context_tokens, has_output_tokens,
 			claude_message_id, claude_request_id,
+			phase, memory_citation_json,
 			source_type, source_subtype, source_uuid,
 			source_parent_uuid, is_sidechain, is_compact_boundary
 		 FROM messages
@@ -1162,19 +1163,21 @@ func pgMessageTokenFingerprint(
 		var model, tokenUsage string
 		var hasContextTokens, hasOutputTokens bool
 		var claudeMsgID, claudeReqID string
+		var phase, memoryCitationJSON string
 		var srcType, srcSubtype, srcUUID, srcParentUUID string
 		var isSidechain, isCompactBoundary bool
 		if err := rows.Scan(
 			&ordinal, &model, &tokenUsage, &contextTokens,
 			&outputTokens, &hasContextTokens, &hasOutputTokens,
 			&claudeMsgID, &claudeReqID,
+			&phase, &memoryCitationJSON,
 			&srcType, &srcSubtype, &srcUUID, &srcParentUUID,
 			&isSidechain, &isCompactBoundary,
 		); err != nil {
 			return "", err
 		}
 		fmt.Fprintf(&b,
-			"%d|%d:%s|%d:%s|%d|%d|%t|%t|%s|%s|"+
+			"%d|%d:%s|%d:%s|%d|%d|%t|%t|%s|%s|%d:%s|%d:%s|"+
 				"%d:%s|%d:%s|%d:%s|%d:%s|%t|%t;",
 			ordinal,
 			len(model), model,
@@ -1182,6 +1185,8 @@ func pgMessageTokenFingerprint(
 			contextTokens, outputTokens,
 			hasContextTokens, hasOutputTokens,
 			claudeMsgID, claudeReqID,
+			len(phase), phase,
+			len(memoryCitationJSON), memoryCitationJSON,
 			len(srcType), srcType,
 			len(srcSubtype), srcSubtype,
 			len(srcUUID), srcUUID,
@@ -1270,6 +1275,7 @@ func bulkInsertMessages(
 		var b strings.Builder
 		b.WriteString(`INSERT INTO messages (
 			session_id, ordinal, role, content, thinking_text,
+			phase, memory_citation_json,
 			timestamp, has_thinking, has_tool_use,
 			content_length, is_system, model, token_usage,
 			context_tokens, output_tokens,
@@ -1278,19 +1284,19 @@ func bulkInsertMessages(
 			source_type, source_subtype, source_uuid,
 			source_parent_uuid, is_sidechain,
 			is_compact_boundary) VALUES `)
-		args := make([]any, 0, len(batch)*24)
+		args := make([]any, 0, len(batch)*26)
 		for j, m := range batch {
 			if j > 0 {
 				b.WriteByte(',')
 			}
-			p := j*24 + 1
+			p := j*26 + 1
 			fmt.Fprintf(&b,
-				"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+				"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
 				p, p+1, p+2, p+3, p+4,
 				p+5, p+6, p+7, p+8, p+9,
 				p+10, p+11, p+12, p+13, p+14, p+15,
 				p+16, p+17, p+18, p+19, p+20,
-				p+21, p+22, p+23,
+				p+21, p+22, p+23, p+24, p+25,
 			)
 			var ts any
 			if m.Timestamp != "" {
@@ -1303,7 +1309,8 @@ func bulkInsertMessages(
 			args = append(args,
 				sessionID, m.Ordinal, m.Role,
 				sanitizePG(m.Content),
-				sanitizePG(m.ThinkingText), ts,
+				sanitizePG(m.ThinkingText),
+				m.Phase, m.MemoryCitationJSON, ts,
 				m.HasThinking,
 				m.HasToolUse, m.ContentLength, m.IsSystem,
 				m.Model, string(m.TokenUsage),

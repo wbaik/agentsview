@@ -36,6 +36,39 @@ func TestInsertAndGetMessage_ThinkingText(t *testing.T) {
 	}
 }
 
+func TestInsertAndGetMessage_CodexPhaseAndMemoryCitation(t *testing.T) {
+	t.Parallel()
+	d := testDB(t)
+	sessionID := "codex-memory-test"
+	insertSession(t, d, sessionID, "proj1")
+
+	citationJSON := `{"entries":[{"path":"MEMORY.md","lineStart":10,"lineEnd":12,"note":"used context"}],"rolloutIds":["019dd3e2-9e4d-7063-a240-779bc4efa78c"]}`
+	insertMessages(t, d, Message{
+		SessionID:          sessionID,
+		Ordinal:            0,
+		Role:               "assistant",
+		Content:            "the answer",
+		Phase:              "final_answer",
+		MemoryCitationJSON: citationJSON,
+		ContentLength:      len("the answer"),
+	})
+
+	got, err := d.GetAllMessages(context.Background(), sessionID)
+	requireNoError(t, err, "GetAllMessages")
+	if len(got) != 1 {
+		t.Fatalf("GetAllMessages returned %d messages, want 1", len(got))
+	}
+	if got[0].Phase != "final_answer" {
+		t.Errorf("Phase = %q, want final_answer", got[0].Phase)
+	}
+	if got[0].MemoryCitationJSON != citationJSON {
+		t.Errorf(
+			"MemoryCitationJSON = %q, want %q",
+			got[0].MemoryCitationJSON, citationJSON,
+		)
+	}
+}
+
 func TestWriteSessionBatchCommitsGoodRowsAndSkipsBadRows(t *testing.T) {
 	d := testDB(t)
 

@@ -524,19 +524,33 @@ type ParsedToolResultEvent struct {
 	Timestamp         time.Time
 }
 
+type ParsedMemoryCitationEntry struct {
+	Path      string `json:"path"`
+	LineStart int    `json:"lineStart"`
+	LineEnd   int    `json:"lineEnd"`
+	Note      string `json:"note"`
+}
+
+type ParsedMemoryCitation struct {
+	Entries    []ParsedMemoryCitationEntry `json:"entries"`
+	RolloutIDs []string                    `json:"rolloutIds"`
+}
+
 // ParsedMessage holds a single extracted message.
 type ParsedMessage struct {
-	Ordinal       int
-	Role          RoleType
-	Content       string
-	ThinkingText  string // concatenated text of all thinking blocks; "" if none
-	Timestamp     time.Time
-	HasThinking   bool
-	HasToolUse    bool
-	IsSystem      bool
-	ContentLength int
-	ToolCalls     []ParsedToolCall
-	ToolResults   []ParsedToolResult
+	Ordinal        int
+	Role           RoleType
+	Content        string
+	ThinkingText   string // concatenated text of all thinking blocks; "" if none
+	Timestamp      time.Time
+	HasThinking    bool
+	HasToolUse     bool
+	IsSystem       bool
+	ContentLength  int
+	ToolCalls      []ParsedToolCall
+	ToolResults    []ParsedToolResult
+	Phase          string
+	MemoryCitation *ParsedMemoryCitation
 
 	Model            string
 	TokenUsage       json.RawMessage

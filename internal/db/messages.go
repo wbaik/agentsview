@@ -14,7 +14,7 @@ import (
 
 const (
 	selectMessageCols = `id, session_id, ordinal, role, content,
-		thinking_text,
+		thinking_text, phase, memory_citation_json,
 		timestamp, has_thinking, has_tool_use, content_length,
 		is_system,
 		model, token_usage, context_tokens, output_tokens,
@@ -24,7 +24,7 @@ const (
 		source_parent_uuid, is_sidechain, is_compact_boundary`
 
 	insertMessageCols = `session_id, ordinal, role, content,
-		thinking_text,
+		thinking_text, phase, memory_citation_json,
 		timestamp, has_thinking, has_tool_use, content_length,
 		is_system,
 		model, token_usage, context_tokens, output_tokens,
@@ -45,7 +45,7 @@ const (
 	// Keep multi-row INSERT statements below SQLite's historic
 	// 999-variable limit so binaries built against older SQLite
 	// versions still work.
-	messageInsertRowsPerStmt         = 39 // 25 params per row
+	messageInsertRowsPerStmt         = 37 // 27 params per row
 	toolCallInsertRowsPerStmt        = 90 // 10 params per row
 	toolResultEventInsertRowsPerStmt = 80 // 12 params per row
 )
@@ -95,28 +95,30 @@ type Message struct {
 	Content   string `json:"content"`
 	// ThinkingText holds the concatenated text of all thinking
 	// blocks for this message; "" if none.
-	ThinkingText      string          `json:"thinking_text"`
-	Timestamp         string          `json:"timestamp"`
-	HasThinking       bool            `json:"has_thinking"`
-	HasToolUse        bool            `json:"has_tool_use"`
-	ContentLength     int             `json:"content_length"`
-	Model             string          `json:"model"`
-	TokenUsage        json.RawMessage `json:"token_usage,omitempty"`
-	ContextTokens     int             `json:"context_tokens"`
-	OutputTokens      int             `json:"output_tokens"`
-	HasContextTokens  bool            `json:"has_context_tokens"`
-	HasOutputTokens   bool            `json:"has_output_tokens"`
-	ClaudeMessageID   string          `json:"claude_message_id,omitempty"`
-	ClaudeRequestID   string          `json:"claude_request_id,omitempty"`
-	ToolCalls         []ToolCall      `json:"tool_calls,omitempty"`
-	ToolResults       []ToolResult    `json:"-"`         // transient, for pairing
-	IsSystem          bool            `json:"is_system"` // persisted, filters search/analytics
-	SourceType        string          `json:"source_type,omitempty"`
-	SourceSubtype     string          `json:"source_subtype,omitempty"`
-	SourceUUID        string          `json:"source_uuid,omitempty"`
-	SourceParentUUID  string          `json:"source_parent_uuid,omitempty"`
-	IsSidechain       bool            `json:"is_sidechain,omitempty"`
-	IsCompactBoundary bool            `json:"is_compact_boundary,omitempty"`
+	ThinkingText       string          `json:"thinking_text"`
+	Phase              string          `json:"phase,omitempty"`
+	MemoryCitationJSON string          `json:"memory_citation_json,omitempty"`
+	Timestamp          string          `json:"timestamp"`
+	HasThinking        bool            `json:"has_thinking"`
+	HasToolUse         bool            `json:"has_tool_use"`
+	ContentLength      int             `json:"content_length"`
+	Model              string          `json:"model"`
+	TokenUsage         json.RawMessage `json:"token_usage,omitempty"`
+	ContextTokens      int             `json:"context_tokens"`
+	OutputTokens       int             `json:"output_tokens"`
+	HasContextTokens   bool            `json:"has_context_tokens"`
+	HasOutputTokens    bool            `json:"has_output_tokens"`
+	ClaudeMessageID    string          `json:"claude_message_id,omitempty"`
+	ClaudeRequestID    string          `json:"claude_request_id,omitempty"`
+	ToolCalls          []ToolCall      `json:"tool_calls,omitempty"`
+	ToolResults        []ToolResult    `json:"-"`         // transient, for pairing
+	IsSystem           bool            `json:"is_system"` // persisted, filters search/analytics
+	SourceType         string          `json:"source_type,omitempty"`
+	SourceSubtype      string          `json:"source_subtype,omitempty"`
+	SourceUUID         string          `json:"source_uuid,omitempty"`
+	SourceParentUUID   string          `json:"source_parent_uuid,omitempty"`
+	IsSidechain        bool            `json:"is_sidechain,omitempty"`
+	IsCompactBoundary  bool            `json:"is_compact_boundary,omitempty"`
 }
 
 // TokenPresence reports whether context/output token fields were
@@ -211,14 +213,14 @@ func insertMessagesTx(
 	for start := 0; start < len(msgs); start += messageInsertRowsPerStmt {
 		end := min(start+messageInsertRowsPerStmt, len(msgs))
 		batch := msgs[start:end]
-		args := make([]any, 0, len(batch)*25)
+		args := make([]any, 0, len(batch)*27)
 		for i, m := range batch {
 			id := nextID + int64(start+i)
 			ids[start+i] = id
 			args = append(args,
 				id,
 				m.SessionID, m.Ordinal, m.Role, m.Content,
-				m.ThinkingText,
+				m.ThinkingText, m.Phase, m.MemoryCitationJSON,
 				m.Timestamp, m.HasThinking, m.HasToolUse,
 				m.ContentLength, m.IsSystem,
 				m.Model, string(m.TokenUsage),
@@ -232,7 +234,7 @@ func insertMessagesTx(
 		query := fmt.Sprintf(
 			"INSERT INTO messages (id, %s) VALUES %s",
 			insertMessageCols,
-			multiRowPlaceholders(len(batch), 25),
+			multiRowPlaceholders(len(batch), 27),
 		)
 		if _, err := tx.Exec(query, args...); err != nil {
 			first := batch[0].Ordinal
@@ -877,7 +879,8 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 		var tokenUsage string
 		err := rows.Scan(
 			&m.ID, &m.SessionID, &m.Ordinal, &m.Role,
-			&m.Content, &m.ThinkingText, &m.Timestamp,
+			&m.Content, &m.ThinkingText, &m.Phase,
+			&m.MemoryCitationJSON, &m.Timestamp,
 			&m.HasThinking, &m.HasToolUse, &m.ContentLength,
 			&m.IsSystem,
 			&m.Model, &tokenUsage,
@@ -929,6 +932,7 @@ func (db *DB) MessageTokenFingerprint(sessionID string) (string, error) {
 		`SELECT ordinal, model, token_usage, context_tokens,
 			output_tokens, has_context_tokens, has_output_tokens,
 			claude_message_id, claude_request_id,
+			phase, memory_citation_json,
 			source_type, source_subtype, source_uuid,
 			source_parent_uuid, is_sidechain, is_compact_boundary
 		 FROM messages
@@ -947,19 +951,21 @@ func (db *DB) MessageTokenFingerprint(sessionID string) (string, error) {
 		var model, tokenUsage string
 		var hasContextTokens, hasOutputTokens bool
 		var claudeMsgID, claudeReqID string
+		var phase, memoryCitationJSON string
 		var srcType, srcSubtype, srcUUID, srcParentUUID string
 		var isSidechain, isCompactBoundary bool
 		if err := rows.Scan(
 			&ordinal, &model, &tokenUsage, &contextTokens,
 			&outputTokens, &hasContextTokens, &hasOutputTokens,
 			&claudeMsgID, &claudeReqID,
+			&phase, &memoryCitationJSON,
 			&srcType, &srcSubtype, &srcUUID, &srcParentUUID,
 			&isSidechain, &isCompactBoundary,
 		); err != nil {
 			return "", err
 		}
 		fmt.Fprintf(&b,
-			"%d|%d:%s|%d:%s|%d|%d|%t|%t|%s|%s|"+
+			"%d|%d:%s|%d:%s|%d|%d|%t|%t|%s|%s|%d:%s|%d:%s|"+
 				"%d:%s|%d:%s|%d:%s|%d:%s|%t|%t;",
 			ordinal,
 			len(model), model,
@@ -967,6 +973,8 @@ func (db *DB) MessageTokenFingerprint(sessionID string) (string, error) {
 			contextTokens, outputTokens,
 			hasContextTokens, hasOutputTokens,
 			claudeMsgID, claudeReqID,
+			len(phase), phase,
+			len(memoryCitationJSON), memoryCitationJSON,
 			len(srcType), srcType,
 			len(srcSubtype), srcSubtype,
 			len(srcUUID), srcUUID,
@@ -1035,7 +1043,8 @@ func (db *DB) GetMessageByOrdinal(
 	var tokenUsage string
 	err := row.Scan(
 		&m.ID, &m.SessionID, &m.Ordinal, &m.Role,
-		&m.Content, &m.ThinkingText, &m.Timestamp,
+		&m.Content, &m.ThinkingText, &m.Phase,
+		&m.MemoryCitationJSON, &m.Timestamp,
 		&m.HasThinking, &m.HasToolUse, &m.ContentLength,
 		&m.IsSystem,
 		&m.Model, &tokenUsage,

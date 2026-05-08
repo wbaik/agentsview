@@ -41,6 +41,10 @@ func TestParseClaudeSession_Basic(t *testing.T) {
 	assertToolCalls(t, msgs[1].ToolCalls, []ParsedToolCall{{ToolUseID: "toolu_1", ToolName: "Read", Category: "Read", InputJSON: `{"file_path":"src/auth.ts"}`}})
 	assert.Equal(t, 0, msgs[0].Ordinal)
 	assert.Equal(t, 1, msgs[1].Ordinal)
+	for i, msg := range msgs {
+		assert.Empty(t, msg.Phase, "msgs[%d].Phase", i)
+		assert.Nil(t, msg.MemoryCitation, "msgs[%d].MemoryCitation", i)
+	}
 }
 
 func TestParseClaudeSession_HyphenatedFilename(t *testing.T) {

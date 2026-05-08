@@ -4739,11 +4739,15 @@ func toDBMessages(pw pendingWrite, blocked map[string]bool) []db.Message {
 	for i, m := range pw.msgs {
 		hasCtx, hasOut := m.TokenPresence()
 		msgs[i] = db.Message{
-			SessionID:         pw.sess.ID,
-			Ordinal:           m.Ordinal,
-			Role:              string(m.Role),
-			Content:           m.Content,
-			ThinkingText:      m.ThinkingText,
+			SessionID:    pw.sess.ID,
+			Ordinal:      m.Ordinal,
+			Role:         string(m.Role),
+			Content:      m.Content,
+			ThinkingText: m.ThinkingText,
+			Phase:        m.Phase,
+			MemoryCitationJSON: memoryCitationJSON(
+				m.MemoryCitation,
+			),
 			Timestamp:         timeutil.Format(m.Timestamp),
 			HasThinking:       m.HasThinking,
 			HasToolUse:        m.HasToolUse,
@@ -4799,6 +4803,25 @@ func toDBUsageEvents(
 		})
 	}
 	return out
+}
+
+func memoryCitationJSON(
+	citation *parser.ParsedMemoryCitation,
+) string {
+	if citation == nil {
+		return ""
+	}
+	if citation.Entries == nil {
+		citation.Entries = []parser.ParsedMemoryCitationEntry{}
+	}
+	if citation.RolloutIDs == nil {
+		citation.RolloutIDs = []string{}
+	}
+	b, err := json.Marshal(citation)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // postFilterCounts returns the total and user message counts

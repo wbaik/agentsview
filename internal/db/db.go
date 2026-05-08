@@ -27,9 +27,16 @@ import (
 // trigger a non-destructive re-sync (mtime reset + skip cache
 // clear) so existing session data is preserved.
 //
-// Bumped to 27: Piebald parser now persists normalized per-message
+// Bumped to 28: Codex parser now persists assistant message
+// phase and structured memory citations from agent_message
+// event side channels, and strips duplicate
+// <oai-mem-citation> suffixes from stored assistant content.
+// Existing rows need re-parsing so final-answer filtering and
+// memory citation rendering use structured message metadata.
+//
+// (27: Piebald parser now persists normalized per-message
 // token_usage JSON. Existing Piebald rows need re-parsing so Usage
-// reports can include older Piebald sessions.
+// reports can include older Piebald sessions.)
 //
 // (26: Claude parser now (a) links Task / Agent tool
 // calls to child subagent sessions via toolUseResult.agentId
@@ -81,7 +88,7 @@ import (
 //
 // (17: Codex <skill> template filtering.)
 // (16: <turn_aborted> system messages.)
-const dataVersion = 27
+const dataVersion = 28
 
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 
@@ -414,6 +421,14 @@ func (db *DB) migrateColumns() error {
 		{
 			"messages", "is_compact_boundary",
 			"ALTER TABLE messages ADD COLUMN is_compact_boundary INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"messages", "phase",
+			"ALTER TABLE messages ADD COLUMN phase TEXT NOT NULL DEFAULT ''",
+		},
+		{
+			"messages", "memory_citation_json",
+			"ALTER TABLE messages ADD COLUMN memory_citation_json TEXT NOT NULL DEFAULT ''",
 		},
 		{
 			"sessions", "total_output_tokens",

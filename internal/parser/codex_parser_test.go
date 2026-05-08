@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -61,6 +62,84 @@ func TestParseCodexSession_PreservesAssistantBlockquotes(t *testing.T) {
 		"blabla1\n\n> blabla2\n\nblabla3\n\n> blabla4\n\nblabla5",
 		msgs[1].Content,
 	)
+}
+
+func TestParseCodexSession_AssistantPhaseFromResponseItem(t *testing.T) {
+	content := testjsonl.JoinJSONL(
+		testjsonl.CodexSessionMetaJSON("phase-123", "/tmp", "codex_cli_rs", tsEarly),
+		testjsonl.CodexMsgJSON("user", "answer", tsEarlyS1),
+		`{"timestamp":"2024-01-01T10:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"done"}]}}`,
+	)
+	sess, msgs := runCodexParserTest(t, "phase.jsonl", content, false)
+
+	require.NotNil(t, sess)
+	require.Len(t, msgs, 2)
+	assert.Equal(t, RoleAssistant, msgs[1].Role)
+	assert.Equal(t, "final_answer", msgs[1].Phase)
+	assert.Nil(t, msgs[1].MemoryCitation)
+}
+
+func TestParseCodexSession_AttachesMemoryCitationFromAgentMessage(t *testing.T) {
+	citationTag := "<oai-mem-citation>\n" +
+		"<citation_entries>\n" +
+		"MEMORY.md:10-12|note=[used context]\n" +
+		"</citation_entries>\n" +
+		"<rollout_ids>\n" +
+		"019dd3e2-9e4d-7063-a240-779bc4efa78c\n" +
+		"</rollout_ids>\n" +
+		"</oai-mem-citation>"
+	content := testjsonl.JoinJSONL(
+		testjsonl.CodexSessionMetaJSON("mem-123", "/tmp", "codex_cli_rs", tsEarly),
+		testjsonl.CodexMsgJSON("user", "answer", tsEarlyS1),
+		`{"timestamp":"2024-01-01T10:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"clean answer","phase":"final_answer","memory_citation":{"entries":[{"path":"MEMORY.md","lineStart":10,"lineEnd":12,"note":"used context"}],"rolloutIds":["019dd3e2-9e4d-7063-a240-779bc4efa78c"]}}}`,
+		fmt.Sprintf(`{"timestamp":"2024-01-01T10:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":%q}]}}`, "clean answer\n\n"+citationTag),
+	)
+	_, msgs := runCodexParserTest(t, "memory.jsonl", content, false)
+
+	require.Len(t, msgs, 2)
+	got := msgs[1]
+	assert.Equal(t, "clean answer", got.Content)
+	assert.Equal(t, len("clean answer"), got.ContentLength)
+	assert.Equal(t, "final_answer", got.Phase)
+	require.NotNil(t, got.MemoryCitation)
+	require.Len(t, got.MemoryCitation.Entries, 1)
+	assert.Equal(t, "MEMORY.md", got.MemoryCitation.Entries[0].Path)
+	assert.Equal(t, 10, got.MemoryCitation.Entries[0].LineStart)
+	assert.Equal(t, 12, got.MemoryCitation.Entries[0].LineEnd)
+	assert.Equal(t, "used context", got.MemoryCitation.Entries[0].Note)
+	assert.Equal(t, []string{"019dd3e2-9e4d-7063-a240-779bc4efa78c"}, got.MemoryCitation.RolloutIDs)
+}
+
+func TestParseCodexSession_StripsMemoryCitationTagWithoutEvent(t *testing.T) {
+	content := testjsonl.JoinJSONL(
+		testjsonl.CodexSessionMetaJSON("strip-123", "/tmp", "codex_cli_rs", tsEarly),
+		testjsonl.CodexMsgJSON("user", "answer", tsEarlyS1),
+		`{"timestamp":"2024-01-01T10:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"clean answer\n\n<oai-mem-citation>\n<citation_entries>\nMEMORY.md:10-12|note=[used context]\n</citation_entries>\n<rollout_ids>\n</rollout_ids>\n</oai-mem-citation>"}]}}`,
+	)
+	_, msgs := runCodexParserTest(t, "strip.jsonl", content, false)
+
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "clean answer", msgs[1].Content)
+	assert.Equal(t, len("clean answer"), msgs[1].ContentLength)
+	assert.Equal(t, "final_answer", msgs[1].Phase)
+	assert.Nil(t, msgs[1].MemoryCitation)
+}
+
+func TestParseCodexSession_DoesNotAttachMismatchedMemoryCitation(t *testing.T) {
+	content := testjsonl.JoinJSONL(
+		testjsonl.CodexSessionMetaJSON("mismatch-123", "/tmp", "codex_cli_rs", tsEarly),
+		testjsonl.CodexMsgJSON("user", "answer", tsEarlyS1),
+		`{"timestamp":"2024-01-01T10:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"clean answer","phase":"final_answer","memory_citation":{"entries":[{"path":"MEMORY.md","lineStart":10,"lineEnd":12,"note":"used context"}],"rolloutIds":[]}}}`,
+		fmt.Sprintf(`{"timestamp":"2024-01-01T10:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":%q}]}}`, "different answer\n\n<oai-mem-citation>\n<citation_entries>\nMEMORY.md:10-12|note=[used context]\n</citation_entries>\n<rollout_ids>\n</rollout_ids>\n</oai-mem-citation>"),
+		`{"timestamp":"2024-01-01T10:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"clean answer"}]}}`,
+	)
+	_, msgs := runCodexParserTest(t, "mismatch.jsonl", content, false)
+
+	require.Len(t, msgs, 3)
+	assert.Equal(t, "different answer", msgs[1].Content)
+	assert.Nil(t, msgs[1].MemoryCitation)
+	assert.Equal(t, "clean answer", msgs[2].Content)
+	assert.Nil(t, msgs[2].MemoryCitation)
 }
 
 func TestParseCodexSession_ExecOriginator(t *testing.T) {

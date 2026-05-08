@@ -1687,3 +1687,56 @@ func TestToDBSessionTerminationStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestToDBMessagesPreservesPhaseAndMemoryCitation(t *testing.T) {
+	pw := pendingWrite{
+		sess: parser.ParsedSession{ID: "s1"},
+		msgs: []parser.ParsedMessage{{
+			Ordinal: 0,
+			Role:    parser.RoleAssistant,
+			Content: "answer",
+			Phase:   "final_answer",
+			MemoryCitation: &parser.ParsedMemoryCitation{
+				Entries: []parser.ParsedMemoryCitationEntry{{
+					Path:      "MEMORY.md",
+					LineStart: 10,
+					LineEnd:   12,
+					Note:      "used context",
+				}},
+				RolloutIDs: []string{
+					"019dd3e2-9e4d-7063-a240-779bc4efa78c",
+				},
+			},
+		}},
+	}
+
+	msgs := toDBMessages(pw, nil)
+	if len(msgs) != 1 {
+		t.Fatalf("toDBMessages returned %d messages, want 1", len(msgs))
+	}
+	if msgs[0].Phase != "final_answer" {
+		t.Fatalf("Phase = %q, want final_answer", msgs[0].Phase)
+	}
+	wantCitation := `{"entries":[{"path":"MEMORY.md","lineStart":10,"lineEnd":12,"note":"used context"}],"rolloutIds":["019dd3e2-9e4d-7063-a240-779bc4efa78c"]}`
+	if msgs[0].MemoryCitationJSON != wantCitation {
+		t.Fatalf(
+			"MemoryCitationJSON = %q, want %q",
+			msgs[0].MemoryCitationJSON, wantCitation,
+		)
+	}
+}
+
+func TestMemoryCitationJSONNormalizesEmptyRolloutIDs(t *testing.T) {
+	got := memoryCitationJSON(&parser.ParsedMemoryCitation{
+		Entries: []parser.ParsedMemoryCitationEntry{{
+			Path:      "MEMORY.md",
+			LineStart: 50,
+			LineEnd:   103,
+			Note:      "prior context",
+		}},
+	})
+	want := `{"entries":[{"path":"MEMORY.md","lineStart":50,"lineEnd":103,"note":"prior context"}],"rolloutIds":[]}`
+	if got != want {
+		t.Fatalf("memoryCitationJSON = %q, want %q", got, want)
+	}
+}

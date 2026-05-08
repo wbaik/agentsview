@@ -44,6 +44,7 @@ type codexSessionBuilder struct {
 	callRefs             map[string]codexToolCallRef
 	agentSpawnCalls      map[string]string
 	agentWaitCalls       map[string]string
+	pendingAgentMessage  *codexPendingAgentMessage
 	pendingAgentEvents   map[string][]codexPendingEvent
 	orphanNotificationIx map[string]int
 	lastTokenUsageRaw    string // dedup streaming duplicates
@@ -68,6 +69,12 @@ type codexPendingEvent struct {
 	text      string
 	timestamp time.Time
 	ordinal   int
+}
+
+type codexPendingAgentMessage struct {
+	message        string
+	phase          string
+	memoryCitation *ParsedMemoryCitation
 }
 
 func newCodexSessionBuilder(
@@ -155,6 +162,10 @@ func (b *codexSessionBuilder) handleResponseItem(
 		return
 	}
 
+	if role == "user" {
+		b.pendingAgentMessage = nil
+	}
+
 	if role == "user" && b.handleSubagentNotification(content, ts) {
 		return
 	}
@@ -169,13 +180,31 @@ func (b *codexSessionBuilder) handleResponseItem(
 		)
 	}
 
+	phase := ""
+	var memoryCitation *ParsedMemoryCitation
+	if role == "assistant" {
+		phase = payload.Get("phase").Str
+		content, _ = stripCodexMemoryCitationTag(content)
+		if pending := b.pendingAgentMessage; pending != nil {
+			if codexAgentMessageMatches(content, pending.message) {
+				if phase == "" {
+					phase = pending.phase
+				}
+				memoryCitation = pending.memoryCitation
+			}
+			b.pendingAgentMessage = nil
+		}
+	}
+
 	b.messages = append(b.messages, ParsedMessage{
-		Ordinal:       b.ordinal,
-		Role:          RoleType(role),
-		Content:       content,
-		Timestamp:     ts,
-		ContentLength: len(content),
-		Model:         b.currentModel,
+		Ordinal:        b.ordinal,
+		Role:           RoleType(role),
+		Content:        content,
+		Timestamp:      ts,
+		ContentLength:  len(content),
+		Phase:          phase,
+		MemoryCitation: memoryCitation,
+		Model:          b.currentModel,
 	})
 	b.ordinal++
 }
@@ -188,6 +217,22 @@ func (b *codexSessionBuilder) handleEventMsg(payload gjson.Result) {
 		b.handleTokenCountEvent(payload)
 	case "collab_agent_spawn_end":
 		b.handleCollabAgentSpawnEnd(payload)
+	case "agent_message":
+		b.handleAgentMessageEvent(payload)
+	}
+}
+
+func (b *codexSessionBuilder) handleAgentMessageEvent(payload gjson.Result) {
+	message := payload.Get("message").Str
+	phase := payload.Get("phase").Str
+	memoryCitation := parseCodexMemoryCitation(payload.Get("memory_citation"))
+	if strings.TrimSpace(message) == "" && phase == "" && memoryCitation == nil {
+		return
+	}
+	b.pendingAgentMessage = &codexPendingAgentMessage{
+		message:        message,
+		phase:          phase,
+		memoryCitation: memoryCitation,
 	}
 }
 
@@ -1088,6 +1133,61 @@ func extractCodexContent(payload gjson.Result) string {
 		},
 	)
 	return strings.Join(texts, "\n")
+}
+
+func parseCodexMemoryCitation(
+	citation gjson.Result,
+) *ParsedMemoryCitation {
+	if !citation.Exists() || citation.Raw == "" || citation.Raw == "null" ||
+		!citation.IsObject() {
+		return nil
+	}
+
+	out := &ParsedMemoryCitation{
+		Entries:    []ParsedMemoryCitationEntry{},
+		RolloutIDs: []string{},
+	}
+	citation.Get("entries").ForEach(func(_, entry gjson.Result) bool {
+		if !entry.IsObject() {
+			return true
+		}
+		out.Entries = append(out.Entries, ParsedMemoryCitationEntry{
+			Path:      entry.Get("path").Str,
+			LineStart: int(entry.Get("lineStart").Int()),
+			LineEnd:   int(entry.Get("lineEnd").Int()),
+			Note:      entry.Get("note").Str,
+		})
+		return true
+	})
+	citation.Get("rolloutIds").ForEach(func(_, id gjson.Result) bool {
+		if s := strings.TrimSpace(id.Str); s != "" {
+			out.RolloutIDs = append(out.RolloutIDs, s)
+		}
+		return true
+	})
+	if len(out.Entries) == 0 && len(out.RolloutIDs) == 0 {
+		return nil
+	}
+	return out
+}
+
+func stripCodexMemoryCitationTag(content string) (string, bool) {
+	const openTag = "<oai-mem-citation>"
+	const closeTag = "</oai-mem-citation>"
+
+	idx := strings.LastIndex(content, openTag)
+	if idx < 0 {
+		return content, false
+	}
+	suffix := strings.TrimSpace(content[idx:])
+	if !strings.HasSuffix(suffix, closeTag) {
+		return content, false
+	}
+	return strings.TrimRight(content[:idx], " \t\r\n"), true
+}
+
+func codexAgentMessageMatches(content, agentMessage string) bool {
+	return strings.TrimSpace(content) == strings.TrimSpace(agentMessage)
 }
 
 // IsCodexExecSessionFile reports whether any session_meta
