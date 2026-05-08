@@ -4745,7 +4745,7 @@ func toDBMessages(pw pendingWrite, blocked map[string]bool) []db.Message {
 			Content:      m.Content,
 			ThinkingText: m.ThinkingText,
 			Phase:        m.Phase,
-			MemoryCitationJSON: memoryCitationJSON(
+			MemoryCitationJSON: parser.MemoryCitationJSON(
 				m.MemoryCitation,
 			),
 			Timestamp:         timeutil.Format(m.Timestamp),
@@ -4803,25 +4803,6 @@ func toDBUsageEvents(
 		})
 	}
 	return out
-}
-
-func memoryCitationJSON(
-	citation *parser.ParsedMemoryCitation,
-) string {
-	if citation == nil {
-		return ""
-	}
-	if citation.Entries == nil {
-		citation.Entries = []parser.ParsedMemoryCitationEntry{}
-	}
-	if citation.RolloutIDs == nil {
-		citation.RolloutIDs = []string{}
-	}
-	b, err := json.Marshal(citation)
-	if err != nil {
-		return ""
-	}
-	return string(b)
 }
 
 // postFilterCounts returns the total and user message counts

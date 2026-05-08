@@ -69,6 +69,16 @@ func TestInsertAndGetMessage_CodexPhaseAndMemoryCitation(t *testing.T) {
 	}
 }
 
+func TestMessageInsertRowsPerStmtBelowSQLiteHistoricVariableLimit(t *testing.T) {
+	t.Parallel()
+	if got := messageInsertRowsPerStmt * messageInsertParamCount; got >= sqliteHistoricVariableLimit {
+		t.Fatalf(
+			"message insert batch uses %d SQLite variables, want below %d",
+			got, sqliteHistoricVariableLimit,
+		)
+	}
+}
+
 func TestWriteSessionBatchCommitsGoodRowsAndSkipsBadRows(t *testing.T) {
 	d := testDB(t)
 

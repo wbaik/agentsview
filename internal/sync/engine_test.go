@@ -1725,18 +1725,3 @@ func TestToDBMessagesPreservesPhaseAndMemoryCitation(t *testing.T) {
 		)
 	}
 }
-
-func TestMemoryCitationJSONNormalizesEmptyRolloutIDs(t *testing.T) {
-	got := memoryCitationJSON(&parser.ParsedMemoryCitation{
-		Entries: []parser.ParsedMemoryCitationEntry{{
-			Path:      "MEMORY.md",
-			LineStart: 50,
-			LineEnd:   103,
-			Note:      "prior context",
-		}},
-	})
-	want := `{"entries":[{"path":"MEMORY.md","lineStart":50,"lineEnd":103,"note":"prior context"}],"rolloutIds":[]}`
-	if got != want {
-		t.Fatalf("memoryCitationJSON = %q, want %q", got, want)
-	}
-}

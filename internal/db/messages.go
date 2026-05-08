@@ -42,10 +42,13 @@ const (
 	// do not exceed SQLite variable limits when hydrating tool calls.
 	attachToolCallBatchSize = 500
 
-	// Keep multi-row INSERT statements below SQLite's historic
-	// 999-variable limit so binaries built against older SQLite
-	// versions still work.
-	messageInsertRowsPerStmt         = 37 // 27 params per row
+	// Keep multi-row INSERT statements strictly below SQLite's
+	// historic 999-variable limit so binaries built against older
+	// SQLite versions still work. When message insert columns
+	// change, update messageInsertParamCount with the VALUES width.
+	sqliteHistoricVariableLimit      = 999
+	messageInsertParamCount          = 27
+	messageInsertRowsPerStmt         = (sqliteHistoricVariableLimit - 1) / messageInsertParamCount
 	toolCallInsertRowsPerStmt        = 90 // 10 params per row
 	toolResultEventInsertRowsPerStmt = 80 // 12 params per row
 )
@@ -213,7 +216,7 @@ func insertMessagesTx(
 	for start := 0; start < len(msgs); start += messageInsertRowsPerStmt {
 		end := min(start+messageInsertRowsPerStmt, len(msgs))
 		batch := msgs[start:end]
-		args := make([]any, 0, len(batch)*27)
+		args := make([]any, 0, len(batch)*messageInsertParamCount)
 		for i, m := range batch {
 			id := nextID + int64(start+i)
 			ids[start+i] = id
@@ -234,7 +237,7 @@ func insertMessagesTx(
 		query := fmt.Sprintf(
 			"INSERT INTO messages (id, %s) VALUES %s",
 			insertMessageCols,
-			multiRowPlaceholders(len(batch), 27),
+			multiRowPlaceholders(len(batch), messageInsertParamCount),
 		)
 		if _, err := tx.Exec(query, args...); err != nil {
 			first := batch[0].Ordinal

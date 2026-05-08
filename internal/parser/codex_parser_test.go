@@ -1482,6 +1482,59 @@ func TestParseCodexSessionFrom_SubagentOutputRequiresFullParse(t *testing.T) {
 	assert.Contains(t, err.Error(), "full parse")
 }
 
+func TestParseCodexSessionFrom_AgentMessageMemoryCitationRequiresFullParse(t *testing.T) {
+	t.Parallel()
+
+	initial := testjsonl.JoinJSONL(
+		testjsonl.CodexSessionMetaJSON("inc-memory-event", "/tmp", "codex_cli_rs", tsEarly),
+		testjsonl.CodexMsgJSON("user", "answer", tsEarlyS1),
+	)
+	path := createTestFile(t, "codex-memory-event-inc.jsonl", initial)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	offset := info.Size()
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	_, err = f.WriteString(testjsonl.JoinJSONL(
+		`{"timestamp":"2024-01-01T10:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"clean answer","phase":"final_answer","memory_citation":{"entries":[{"path":"MEMORY.md","lineStart":10,"lineEnd":12,"note":"used context"}],"rolloutIds":["019dd3e2-9e4d-7063-a240-779bc4efa78c"]}}}`,
+	))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	_, _, _, err = ParseCodexSessionFrom(path, offset, 1, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "full parse")
+}
+
+func TestParseCodexSessionFrom_MemoryCitationTagRequiresFullParse(t *testing.T) {
+	t.Parallel()
+
+	initial := testjsonl.JoinJSONL(
+		testjsonl.CodexSessionMetaJSON("inc-memory-tag", "/tmp", "codex_cli_rs", tsEarly),
+		testjsonl.CodexMsgJSON("user", "answer", tsEarlyS1),
+		`{"timestamp":"2024-01-01T10:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"clean answer","phase":"final_answer","memory_citation":{"entries":[{"path":"MEMORY.md","lineStart":10,"lineEnd":12,"note":"used context"}],"rolloutIds":[]}}}`,
+	)
+	path := createTestFile(t, "codex-memory-tag-inc.jsonl", initial)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	offset := info.Size()
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	_, err = f.WriteString(testjsonl.JoinJSONL(
+		`{"timestamp":"2024-01-01T10:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"clean answer\n\n<oai-mem-citation>\n<citation_entries>\nMEMORY.md:10-12|note=[used context]\n</citation_entries>\n<rollout_ids>\n</rollout_ids>\n</oai-mem-citation>"}]}}`,
+	))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	_, _, _, err = ParseCodexSessionFrom(path, offset, 1, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "full parse")
+}
+
 func TestParseCodexSessionFrom_CollabAgentSpawnEndRequiresFullParse(t *testing.T) {
 	t.Parallel()
 

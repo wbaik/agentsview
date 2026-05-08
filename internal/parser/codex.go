@@ -1441,8 +1441,17 @@ func isCodexSubagentNotification(content string) bool {
 func codexIncrementalNeedsFullParse(line string) bool {
 	switch gjson.Get(line, "type").Str {
 	case codexTypeEventMsg:
-		return gjson.Get(line, "payload.type").Str ==
-			"collab_agent_spawn_end"
+		payload := gjson.Get(line, "payload")
+		switch payload.Get("type").Str {
+		case "collab_agent_spawn_end":
+			return true
+		case "agent_message":
+			citation := payload.Get("memory_citation")
+			return citation.Exists() && citation.Raw != "" &&
+				citation.Raw != "null"
+		default:
+			return false
+		}
 	case codexTypeResponseItem:
 	default:
 		return false
@@ -1456,6 +1465,12 @@ func codexIncrementalNeedsFullParse(line string) bool {
 		output, _ := parseCodexFunctionOutput(payload)
 		return isCodexSubagentFunctionOutput(output)
 	default:
+		if strings.Contains(
+			extractCodexContent(payload),
+			"<oai-mem-citation>",
+		) {
+			return true
+		}
 		role := payload.Get("role").Str
 		if role != "user" {
 			return false
