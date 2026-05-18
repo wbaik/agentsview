@@ -76,16 +76,35 @@ CLI (agentsview) → Config → DB (SQLite/FTS5)
 ## Development
 
 ```bash
-make build          # Build binary with embedded frontend
-make dev            # Run Go server in dev mode
-make frontend       # Build frontend SPA only
-make frontend-dev   # Run Vite dev server (use alongside make dev)
-make install        # Build and install to ~/.local/bin or GOPATH
-make install-hooks  # Install pre-commit git hooks
+make build             # Build binary with embedded frontend
+make dev               # Run Go server in dev mode
+make frontend          # Build frontend SPA only
+make frontend-dev      # Run Vite dev server (use alongside make dev)
+make install           # Build and install to ~/.local/bin or GOPATH
+make install-service   # macOS: register LaunchAgent for `agentsview serve`
+make uninstall-service # macOS: stop and remove the LaunchAgent
+make install-hooks     # Install pre-commit git hooks
 ```
 
 After making Go code changes, always run `go fmt ./...` and `go vet ./...`
 before committing.
+
+### Running as a background service (macOS)
+
+`make install-service` generates `~/Library/LaunchAgents/io.agentsview.serve.plist`
+and registers it with `launchctl`. The agent runs `agentsview serve --no-browser`
+on login, respawns on crash (`KeepAlive`, 10s `ThrottleInterval`), and writes
+logs to `~/.agentsview/serve.launchd.{out,err}.log`. Default port is 8080;
+override with `SERVICE_PORT=9000 make install-service`.
+
+`make install` ends with `launchctl kickstart -k` against the agent label
+(`io.agentsview.serve`), so rebuilds are picked up automatically. The kickstart
+is a silent no-op when the agent is not loaded or the host is not Darwin — the
+target stays safe for every other user and CI.
+
+**Do not run `agentsview serve` from a terminal while the LaunchAgent is up.**
+Two processes will contend for `~/.agentsview/sessions.db` and the file watcher
+will double-fire. Run `make uninstall-service` first when debugging locally.
 
 ## Testing
 
