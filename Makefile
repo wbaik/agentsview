@@ -19,7 +19,7 @@ AIR_BIN := $(shell if command -v air >/dev/null 2>&1; then command -v air; \
 	elif [ -x "$(GOPATH_FIRST)/bin/air" ]; then printf "%s" "$(GOPATH_FIRST)/bin/air"; \
 	fi)
 
-.PHONY: build build-release install frontend frontend-dev dev check-air air-install desktop-dev desktop-build desktop-macos-app desktop-macos-dmg desktop-windows-installer desktop-linux-appimage desktop-app test test-short test-postgres test-postgres-ci postgres-up postgres-down test-ssh test-ssh-ci ssh-up ssh-down e2e vet lint lint-ci lint-golangci lint-golangci-ci nilaway nilaway-golangci-build lint-tools tidy clean release release-darwin-arm64 release-darwin-amd64 release-linux-amd64 install-hooks ensure-embed-dir dev-snapshot help
+.PHONY: build build-release install install-service uninstall-service frontend frontend-dev dev check-air air-install desktop-dev desktop-build desktop-macos-app desktop-macos-dmg desktop-windows-installer desktop-linux-appimage desktop-app test test-short test-postgres test-postgres-ci postgres-up postgres-down test-ssh test-ssh-ci ssh-up ssh-down e2e vet lint lint-ci lint-golangci lint-golangci-ci nilaway nilaway-golangci-build lint-tools tidy clean release release-darwin-arm64 release-darwin-amd64 release-linux-amd64 install-hooks ensure-embed-dir dev-snapshot help
 
 # Ensure go:embed has at least one file (no-op if frontend is built)
 ensure-embed-dir:
@@ -54,6 +54,69 @@ install: build-release
 		echo "Installing to $$INSTALL_DIR/agentsview"; \
 		cp agentsview "$$INSTALL_DIR/agentsview"; \
 	fi
+	@if [ "$$(uname -s)" = "Darwin" ] \
+		&& launchctl print "gui/$$(id -u)/$(SERVICE_LABEL)" >/dev/null 2>&1; then \
+		launchctl kickstart -k "gui/$$(id -u)/$(SERVICE_LABEL)" \
+			&& echo "Restarted LaunchAgent $(SERVICE_LABEL)"; \
+	fi
+
+# LaunchAgent (macOS) — keep `agentsview serve` running on login.
+# Override SERVICE_PORT to bind a different port.
+SERVICE_LABEL  := io.agentsview.serve
+SERVICE_PLIST  := $(HOME)/Library/LaunchAgents/$(SERVICE_LABEL).plist
+SERVICE_BINARY := $(HOME)/.local/bin/agentsview
+SERVICE_LOGDIR := $(HOME)/.agentsview
+SERVICE_PORT   ?= 8080
+
+# Generate the plist with absolute paths and (re)load it via launchctl.
+# Idempotent: re-running rewrites the plist and reloads the service.
+install-service:
+	@test "$$(uname -s)" = "Darwin" \
+		|| { echo "install-service is macOS-only"; exit 1; }
+	@test -x "$(SERVICE_BINARY)" \
+		|| { echo "$(SERVICE_BINARY) not found — run 'make install' first"; exit 1; }
+	@mkdir -p "$(SERVICE_LOGDIR)" "$(HOME)/Library/LaunchAgents"
+	@{ \
+		printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'; \
+		printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'; \
+		printf '%s\n' '<plist version="1.0">'; \
+		printf '%s\n' '<dict>'; \
+		printf '  <key>Label</key><string>%s</string>\n' '$(SERVICE_LABEL)'; \
+		printf '%s\n' '  <key>ProgramArguments</key>'; \
+		printf '%s\n' '  <array>'; \
+		printf '    <string>%s</string>\n' '$(SERVICE_BINARY)'; \
+		printf '    <string>%s</string>\n' 'serve'; \
+		printf '    <string>%s</string>\n' '--no-browser'; \
+		printf '    <string>%s</string>\n' '--host'; \
+		printf '    <string>%s</string>\n' '127.0.0.1'; \
+		printf '    <string>%s</string>\n' '--port'; \
+		printf '    <string>%s</string>\n' '$(SERVICE_PORT)'; \
+		printf '%s\n' '  </array>'; \
+		printf '%s\n' '  <key>RunAtLoad</key><true/>'; \
+		printf '%s\n' '  <key>KeepAlive</key>'; \
+		printf '%s\n' '  <dict><key>SuccessfulExit</key><false/></dict>'; \
+		printf '%s\n' '  <key>ThrottleInterval</key><integer>10</integer>'; \
+		printf '  <key>WorkingDirectory</key><string>%s</string>\n' '$(HOME)'; \
+		printf '  <key>StandardOutPath</key><string>%s/serve.launchd.out.log</string>\n' '$(SERVICE_LOGDIR)'; \
+		printf '  <key>StandardErrorPath</key><string>%s/serve.launchd.err.log</string>\n' '$(SERVICE_LOGDIR)'; \
+		printf '%s\n' '</dict></plist>'; \
+	} > "$(SERVICE_PLIST)"
+	@if launchctl print "gui/$$(id -u)/$(SERVICE_LABEL)" >/dev/null 2>&1; then \
+		launchctl bootout "gui/$$(id -u)" "$(SERVICE_PLIST)" 2>/dev/null || true; \
+	fi
+	@launchctl bootstrap "gui/$$(id -u)" "$(SERVICE_PLIST)"
+	@echo "LaunchAgent $(SERVICE_LABEL) installed → http://127.0.0.1:$(SERVICE_PORT)"
+
+# Stop and remove the LaunchAgent. Leaves the data dir alone.
+uninstall-service:
+	@test "$$(uname -s)" = "Darwin" \
+		|| { echo "uninstall-service is macOS-only"; exit 1; }
+	@if launchctl print "gui/$$(id -u)/$(SERVICE_LABEL)" >/dev/null 2>&1; then \
+		launchctl bootout "gui/$$(id -u)" "$(SERVICE_PLIST)" \
+			&& echo "Stopped LaunchAgent $(SERVICE_LABEL)"; \
+	fi
+	@rm -f "$(SERVICE_PLIST)"
+	@echo "Removed $(SERVICE_PLIST)"
 
 # Build frontend SPA and copy into embed directory
 frontend:
@@ -371,6 +434,8 @@ help:
 	@echo "  build          - Build with embedded frontend"
 	@echo "  build-release  - Release build (optimized, stripped)"
 	@echo "  install        - Build and install to ~/.local/bin or GOPATH"
+	@echo "  install-service   - macOS: register LaunchAgent so 'agentsview serve' runs on login"
+	@echo "  uninstall-service - macOS: stop and remove the LaunchAgent"
 	@echo ""
 	@echo "  dev            - Run Go server with live reload via air (use with frontend-dev)"
 	@echo "  dev-snapshot   - Run agentsview against a fresh snapshot of prod sessions.db"
