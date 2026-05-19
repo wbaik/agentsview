@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/wesm/agentsview/internal/db"
@@ -58,6 +59,15 @@ func (s *Server) handleMarkdownSession(
 		writeError(w, http.StatusBadRequest, "invalid depth")
 		return
 	}
+	tail := 0
+	if tailStr := strings.TrimSpace(r.URL.Query().Get("tail")); tailStr != "" {
+		n, err := strconv.Atoi(tailStr)
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid tail")
+			return
+		}
+		tail = n
+	}
 	tree, err := s.loadExportSessionTree(r.Context(), r.PathValue("id"), depth, map[string]bool{}, 0)
 	if err != nil {
 		if handleContextError(w, err) {
@@ -69,6 +79,9 @@ func (s *Server) handleMarkdownSession(
 	if tree == nil || tree.Session == nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
+	}
+	if tail > 0 && len(tree.Messages) > tail {
+		tree.Messages = tree.Messages[len(tree.Messages)-tail:]
 	}
 	md := generateExportMarkdownTree(tree, exportMarkdownOptions{Depth: depth})
 	filename := sanitizeFilename(

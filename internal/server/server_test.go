@@ -2138,6 +2138,50 @@ func TestMarkdownSessionExport_InvalidDepth(t *testing.T) {
 	assertStatus(t, w, http.StatusBadRequest)
 }
 
+func TestMarkdownSessionExport_TailReturnsRecentMessages(t *testing.T) {
+	te := setup(t)
+	te.seedSession(t, "s1", "my-app", 5)
+	te.seedMessages(t, "s1", 5)
+
+	w := te.get(t, "/api/v1/sessions/s1/md?tail=2")
+	assertStatus(t, w, http.StatusOK)
+
+	body := w.Body.String()
+	// Messages A..E are seeded; tail=2 should keep only D and E.
+	if strings.Contains(body, "Message C") {
+		t.Fatalf("expected tail=2 to drop Message C, got:\n%s", body)
+	}
+	for _, want := range []string{"Message D", "Message E"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected %q in tail=2 body, got:\n%s", want, body)
+		}
+	}
+}
+
+func TestMarkdownSessionExport_TailLargerThanMessagesIsNoop(t *testing.T) {
+	te := setup(t)
+	te.seedSession(t, "s1", "my-app", 3)
+	te.seedMessages(t, "s1", 3)
+
+	w := te.get(t, "/api/v1/sessions/s1/md?tail=99")
+	assertStatus(t, w, http.StatusOK)
+	for _, want := range []string{"Message A", "Message B", "Message C"} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Fatalf("expected %q in body, got:\n%s", want, w.Body.String())
+		}
+	}
+}
+
+func TestMarkdownSessionExport_InvalidTail(t *testing.T) {
+	te := setup(t)
+	te.seedSession(t, "s1", "my-app", 1)
+
+	for _, bad := range []string{"abc", "-1", "0"} {
+		w := te.get(t, "/api/v1/sessions/s1/md?tail="+bad)
+		assertStatus(t, w, http.StatusBadRequest)
+	}
+}
+
 func TestMarkdownSessionExport_DepthOneIncludesChildSessions(t *testing.T) {
 	te := setup(t)
 	te.seedSession(t, "parent", "my-app", 1)
