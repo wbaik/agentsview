@@ -2158,6 +2158,60 @@ func TestMarkdownSessionExport_TailReturnsRecentMessages(t *testing.T) {
 	}
 }
 
+func TestMarkdownSessionExport_FocusedTailCountsFilteredMessages(t *testing.T) {
+	te := setup(t)
+	te.seedSession(t, "s1", "my-app", 9)
+	te.seedMessages(t, "s1", 9, func(i int, m *db.Message) {
+		switch i {
+		case 0:
+			m.Role = "user"
+			m.Content = "Prompt A"
+		case 1:
+			m.Role = "assistant"
+			m.Content = "Draft A"
+		case 2:
+			m.Role = "assistant"
+			m.Content = "[Bash]\nrun-a"
+			m.HasToolUse = true
+		case 3:
+			m.Role = "assistant"
+			m.Content = "Final A"
+		case 4:
+			m.Role = "user"
+			m.Content = "Prompt B"
+		case 5:
+			m.Role = "assistant"
+			m.Content = "[Read]\nfile-b"
+			m.HasToolUse = true
+		case 6:
+			m.Role = "assistant"
+			m.Content = "[Bash]\nrun-b"
+			m.HasToolUse = true
+		case 7:
+			m.Role = "assistant"
+			m.Content = "Final B"
+		case 8:
+			m.Role = "user"
+			m.Content = "Prompt C"
+		}
+	})
+
+	w := te.get(t, "/api/v1/sessions/s1/md?focused=1&tail=4")
+	assertStatus(t, w, http.StatusOK)
+
+	body := w.Body.String()
+	for _, want := range []string{"Final A", "Prompt B", "Final B", "Prompt C"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected focused tail to include %q, got:\n%s", want, body)
+		}
+	}
+	for _, dropped := range []string{"Prompt A", "Draft A", "run-a", "file-b", "run-b"} {
+		if strings.Contains(body, dropped) {
+			t.Fatalf("expected focused tail to drop %q, got:\n%s", dropped, body)
+		}
+	}
+}
+
 func TestMarkdownSessionExport_TailLargerThanMessagesIsNoop(t *testing.T) {
 	te := setup(t)
 	te.seedSession(t, "s1", "my-app", 3)

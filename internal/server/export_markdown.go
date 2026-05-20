@@ -68,6 +68,7 @@ func (s *Server) handleMarkdownSession(
 		}
 		tail = n
 	}
+	focused := r.URL.Query().Get("focused") == "1"
 	tree, err := s.loadExportSessionTree(r.Context(), r.PathValue("id"), depth, map[string]bool{}, 0)
 	if err != nil {
 		if handleContextError(w, err) {
@@ -79,6 +80,9 @@ func (s *Server) handleMarkdownSession(
 	if tree == nil || tree.Session == nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
+	}
+	if focused {
+		tree.Messages = filterFocusedMarkdownMessages(tree.Messages)
 	}
 	if tail > 0 && len(tree.Messages) > tail {
 		tree.Messages = tree.Messages[len(tree.Messages)-tail:]
@@ -93,6 +97,17 @@ func (s *Server) handleMarkdownSession(
 		fmt.Sprintf(`inline; filename="%s"`, filename),
 	)
 	_, _ = io.WriteString(w, md)
+}
+
+func filterFocusedMarkdownMessages(msgs []db.Message) []db.Message {
+	visible := focusedExportOrdinals(msgs)
+	filtered := make([]db.Message, 0, len(visible))
+	for _, msg := range msgs {
+		if visible[msg.Ordinal] {
+			filtered = append(filtered, msg)
+		}
+	}
+	return filtered
 }
 
 func (s *Server) loadExportSessionTree(
