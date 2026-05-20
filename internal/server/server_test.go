@@ -2263,6 +2263,73 @@ func TestMarkdownSessionExport_DepthOneIncludesChildSessions(t *testing.T) {
 	assertBodyContains(t, w, `<subagent_session id="child-a" parent_session_id="parent" relationship="subagent"`)
 }
 
+func TestMarkdownSessionExport_FocusedDepthFiltersAndPreservesChildSessions(t *testing.T) {
+	te := setup(t)
+	te.seedSession(t, "parent", "my-app", 1)
+	te.seedMessages(t, "parent", 1, func(i int, m *db.Message) {
+		m.Role = "assistant"
+		m.Content = "[Task]\nchild work"
+		m.HasToolUse = true
+		m.ToolCalls = []db.ToolCall{{
+			ToolName:          "Task",
+			Category:          "Task",
+			ToolUseID:         "toolu_child",
+			InputJSON:         `{"prompt":"inspect child"}`,
+			SubagentSessionID: "child-a",
+		}}
+	})
+	te.seedSession(t, "child-a", "my-app", 5, func(s *db.Session) {
+		s.ParentSessionID = new("parent")
+		s.RelationshipType = "subagent"
+	})
+	te.seedMessages(t, "child-a", 5, func(i int, m *db.Message) {
+		switch i {
+		case 0:
+			m.Role = "user"
+			m.Content = "Child prompt"
+		case 1:
+			m.Role = "assistant"
+			m.Content = "Child draft"
+		case 2:
+			m.Role = "assistant"
+			m.Content = "[Read]\nchild-file"
+			m.HasToolUse = true
+		case 3:
+			m.Role = "assistant"
+			m.Content = "Child final"
+		case 4:
+			m.Role = "assistant"
+			m.Content = "[Thinking]\nchild hidden thought"
+			m.HasThinking = true
+		}
+	})
+
+	w := te.get(t, "/api/v1/sessions/parent/md?focused=1&depth=1")
+	assertStatus(t, w, http.StatusOK)
+
+	body := w.Body.String()
+	for _, want := range []string{
+		`<child_session id="child-a" parent_session_id="parent" relationship="subagent"`,
+		"Child prompt",
+		"Child final",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected focused depth export to include %q, got:\n%s", want, body)
+		}
+	}
+	for _, dropped := range []string{
+		`<subagent_anchor session_id="child-a"`,
+		"child work",
+		"Child draft",
+		"child-file",
+		"child hidden thought",
+	} {
+		if strings.Contains(body, dropped) {
+			t.Fatalf("expected focused depth export to drop %q, got:\n%s", dropped, body)
+		}
+	}
+}
+
 func TestMarkdownSessionExport_DefaultOmitsChildSessions(t *testing.T) {
 	te := setup(t)
 	te.seedSession(t, "parent", "my-app", 1)

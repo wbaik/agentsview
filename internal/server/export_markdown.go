@@ -82,7 +82,7 @@ func (s *Server) handleMarkdownSession(
 		return
 	}
 	if focused {
-		tree.Messages = filterFocusedMarkdownMessages(tree.Messages)
+		filterFocusedMarkdownTree(tree)
 	}
 	if tail > 0 && len(tree.Messages) > tail {
 		tree.Messages = tree.Messages[len(tree.Messages)-tail:]
@@ -97,6 +97,19 @@ func (s *Server) handleMarkdownSession(
 		fmt.Sprintf(`inline; filename="%s"`, filename),
 	)
 	_, _ = io.WriteString(w, md)
+}
+
+func filterFocusedMarkdownTree(tree *exportSessionTree) {
+	if tree == nil {
+		return
+	}
+	tree.Messages = filterFocusedMarkdownMessages(tree.Messages)
+	for _, child := range tree.AnchoredChildren {
+		filterFocusedMarkdownTree(child)
+	}
+	for _, child := range tree.AppendedChildren {
+		filterFocusedMarkdownTree(child)
+	}
 }
 
 func filterFocusedMarkdownMessages(msgs []db.Message) []db.Message {
@@ -282,6 +295,7 @@ func renderMarkdownSession(
 		}
 		renderMarkdownChildSession(b, child, opts, false)
 	}
+	renderUnanchoredMarkdownChildren(b, tree, opts, renderedAnchors)
 
 	b.WriteString(closeTag(tag))
 	b.WriteString("\n")
@@ -315,8 +329,34 @@ func renderMarkdownChildSession(
 		}
 		renderMarkdownChildSession(b, appended, opts, false)
 	}
+	renderUnanchoredMarkdownChildren(b, child, opts, renderedAnchors)
 	b.WriteString(closeTag(tag))
 	b.WriteString("\n")
+}
+
+func renderUnanchoredMarkdownChildren(
+	b *strings.Builder,
+	tree *exportSessionTree,
+	opts exportMarkdownOptions,
+	renderedAnchors map[string]bool,
+) {
+	if opts.Depth == "" || len(tree.AnchoredChildren) == 0 {
+		return
+	}
+	children := make([]*exportSessionTree, 0, len(tree.AnchoredChildren))
+	for _, child := range tree.AnchoredChildren {
+		if child == nil || child.Session == nil {
+			continue
+		}
+		if renderedAnchors[child.Session.ID] {
+			continue
+		}
+		children = append(children, child)
+	}
+	for _, child := range sortedExportChildren(children) {
+		renderedAnchors[child.Session.ID] = true
+		renderMarkdownChildSession(b, child, opts, false)
+	}
 }
 
 func renderMarkdownMessage(
