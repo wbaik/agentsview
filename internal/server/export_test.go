@@ -823,6 +823,45 @@ func TestGenerateExportMarkdown_PreservesMultiWordToolNamesAndResultEvents(t *te
 	})
 }
 
+func TestGenerateExportMarkdown_OmitsNoisyToolPayloads(t *testing.T) {
+	t.Parallel()
+	session := testSession()
+	msgs := []db.Message{{
+		SessionID:  "test-id",
+		Ordinal:    0,
+		Role:       "assistant",
+		Content:    "Added the test file.\n\n[Write]\ncreated file",
+		HasToolUse: true,
+		ToolCalls: []db.ToolCall{{
+			ToolName:      "Write",
+			Category:      "Write",
+			ToolUseID:     "toolu_write",
+			InputJSON:     `{"file_path":"tests/test_viewer.py","content":"assert True\n"}`,
+			ResultContent: "file written",
+		}},
+	}}
+
+	full := generateExportMarkdown(session, msgs, exportMarkdownOptions{})
+	assertContainsAll(t, full, []string{
+		`<tool_call id="toolu_write" name="Write" category="Write">`,
+		`<arguments><![CDATA[` + "\n{\"file_path\":\"tests/test_viewer.py\",\"content\":\"assert True\\n\"}\n" + `]]></arguments>`,
+		`<tool_result><![CDATA[` + "\nfile written\n" + `]]></tool_result>`,
+	})
+
+	focused := generateExportMarkdown(session, msgs, exportMarkdownOptions{
+		OmitNoisyToolPayloads: true,
+	})
+	assertContainsAll(t, focused, []string{
+		"Added the test file.",
+	})
+	assertContainsNone(t, focused, []string{
+		`<tool_call`,
+		`<arguments>`,
+		`assert True`,
+		`file written`,
+	})
+}
+
 func TestGenerateExportMarkdown_EmitsEmptyMessages(t *testing.T) {
 	t.Parallel()
 	session := testSession()

@@ -2212,6 +2212,39 @@ func TestMarkdownSessionExport_FocusedTailCountsFilteredMessages(t *testing.T) {
 	}
 }
 
+func TestMarkdownSessionExport_FocusedOmitsNoisyWritePayloads(t *testing.T) {
+	te := setup(t)
+	te.seedSession(t, "s1", "my-app", 2)
+	te.seedMessages(t, "s1", 2, func(i int, m *db.Message) {
+		switch i {
+		case 0:
+			m.Role = "user"
+			m.Content = "Add the focused export test"
+		case 1:
+			m.Role = "assistant"
+			m.Content = "Added the focused export test.\n\n[Write]\ncreated file"
+			m.HasToolUse = true
+			m.ToolCalls = []db.ToolCall{{
+				ToolName:      "Write",
+				Category:      "Write",
+				ToolUseID:     "toolu_write",
+				InputJSON:     `{"file_path":"tests/test_viewer.py","content":"assert True\n"}`,
+				ResultContent: "file written",
+			}}
+		}
+	})
+
+	w := te.get(t, "/api/v1/sessions/s1/md?focused=1")
+	assertStatus(t, w, http.StatusOK)
+
+	body := w.Body.String()
+	assert.Contains(t, body, "Added the focused export test.")
+	assert.NotContains(t, body, `<tool_call`)
+	assert.NotContains(t, body, `<arguments>`)
+	assert.NotContains(t, body, `assert True`)
+	assert.NotContains(t, body, `file written`)
+}
+
 func TestMarkdownSessionExport_TailLargerThanMessagesIsNoop(t *testing.T) {
 	te := setup(t)
 	te.seedSession(t, "s1", "my-app", 3)

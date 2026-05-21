@@ -17,7 +17,8 @@ import (
 )
 
 type exportMarkdownOptions struct {
-	Depth string
+	Depth                 string
+	OmitNoisyToolPayloads bool
 }
 
 type exportSessionTree struct {
@@ -87,7 +88,10 @@ func (s *Server) handleMarkdownSession(
 	if tail > 0 && len(tree.Messages) > tail {
 		tree.Messages = tree.Messages[len(tree.Messages)-tail:]
 	}
-	md := generateExportMarkdownTree(tree, exportMarkdownOptions{Depth: depth})
+	md := generateExportMarkdownTree(tree, exportMarkdownOptions{
+		Depth:                 depth,
+		OmitNoisyToolPayloads: focused,
+	})
 	filename := sanitizeFilename(
 		tree.Session.Project + "-" + formatDateShort(tree.Session.StartedAt) + ".md",
 	)
@@ -428,6 +432,9 @@ func renderMarkdownToolSegment(
 	opts exportMarkdownOptions,
 	renderedAnchors map[string]bool,
 ) {
+	if opts.OmitNoisyToolPayloads && isNoisyMarkdownTool(seg) {
+		return
+	}
 	name, category := markdownToolIdentity(seg)
 	attrs := map[string]string{}
 	if name != "" {
@@ -509,6 +516,19 @@ func renderMarkdownToolSegment(
 			b.WriteString("\n")
 		}
 	}
+}
+
+func isNoisyMarkdownTool(seg markdownSegment) bool {
+	name, category := markdownToolIdentity(seg)
+	switch normalizeMarkdownToolName(name) {
+	case "Write", "Edit", "MultiEdit", "NotebookEdit":
+		return true
+	}
+	switch normalizeMarkdownToolName(category) {
+	case "Write", "Edit", "MultiEdit", "NotebookEdit":
+		return true
+	}
+	return false
 }
 
 func markdownToolIdentity(seg markdownSegment) (string, string) {
