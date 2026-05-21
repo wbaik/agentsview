@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Focused Markdown Execution Filter Implementation Plan</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { max-width: 880px; margin: 40px auto; padding: 0 24px; font: 16px/1.55 system-ui, sans-serif; color: #e5e7eb; background: #0f1117; }
+    h1, h2, h3 { line-height: 1.2; }
+    h1, h2, h3, strong { color: #f8fafc; }
+    a { color: #8ab4f8; }
+    code, pre { background: #171b24; border: 1px solid #303746; border-radius: 6px; }
+    code { padding: 0.1rem 0.25rem; }
+    pre { padding: 1rem; overflow-x: auto; }
+    .meta { color: #a7b0c0; }
+    li { margin: 0.5rem 0; }
+  </style>
+</head>
+<body>
+  <h1>Focused Markdown Execution Filter Implementation Plan</h1>
+  <p class="meta"><strong>Implementation:</strong> Use <code>newpowers:executing-plans</code> to implement this plan directly in the current session.</p>
+
+  <section>
+    <h2>Goal</h2>
+    <p>Change focused markdown exports so Agent Relay and RoboRev reviewer context carries user intent and visible high-level assistant context, while omitting tool execution transcripts and subagent execution detail.</p>
+  </section>
+
+  <section>
+    <h2>Spec</h2>
+    <p>The full markdown export remains a faithful archive. Only focused markdown, requested with <code>focused=1</code>, changes behavior.</p>
+    <p>Focused markdown must keep user messages and visible assistant text that survived the existing focused-message selection. Focused markdown must remove execution-only segments before rendering: <code>thinking</code>, <code>tool_call</code>, <code>arguments</code>, <code>tool_body</code>, <code>tool_result</code>, <code>subagent_anchor</code>, and the anchored <code>subagent_session</code> body produced through a tool call.</p>
+    <p>Focused markdown should not classify tools by name. <code>Write</code>, <code>Edit</code>, <code>Bash</code>, <code>Read</code>, <code>Task</code>, <code>Todo List</code>, MCP tools, and future tool names should all be omitted when they are rendered as tool segments in focused output.</p>
+    <p>Focused markdown may still include unanchored child sessions that are selected by the existing focused tree filtering, because those are session context rather than the inline body of a tool call. If that becomes too noisy later, handle it as a separate product decision.</p>
+    <p>Code blocks and skill blocks that appear in visible message text are not execution tags named by this spec. Keep them unless they are part of a tool segment.</p>
+  </section>
+
+  <section>
+    <h2>Architecture</h2>
+    <p>The markdown renderer already parses messages into segment types in <code>internal/server/export_markdown.go</code>. Replace the current write/edit-specific <code>OmitNoisyToolPayloads</code> option with a focused export option that omits all execution segments during rendering.</p>
+    <p>The existing focused ordinal filtering in <code>internal/server/export.go</code> should remain responsible for choosing which messages appear. This change should only affect what gets rendered inside the messages selected for focused markdown.</p>
+    <p>Do not change SQLite persistence, parser typing, or tool-call ingestion. The database stores raw tool-call metadata and JSON; the export layer owns this context-shaping behavior.</p>
+  </section>
+
+  <section>
+    <h2>Tech Stack</h2>
+    <p>Go server code and tests under <code>internal/server</code>. Verification uses <code>go test</code>, <code>gofmt</code>, <code>git diff --check</code>, and git status/diff inspection before commit.</p>
+  </section>
+
+  <section>
+    <h2>Task 1: Renderer Unit Spec</h2>
+    <h3>Files</h3>
+    <ul>
+      <li>Modify: <code>internal/server/export_test.go</code></li>
+    </ul>
+
+    <h3>Happy Path</h3>
+    <p><code>generateExportMarkdown</code> with default options still renders archival thinking and tool details. With focused execution filtering enabled, it keeps visible text and omits every execution tag and payload.</p>
+
+    <h3>Unhappy Path</h3>
+    <p>The regression case is any non-write tool, such as <code>Bash</code> or <code>Task</code>, leaking into focused output because the old filter only recognized write-like tools. The test must fail against the current implementation for that reason.</p>
+
+    <h3>Safeguards</h3>
+    <p>Use payload marker strings that would be damaging in reviewer context if leaked, such as shell commands, command output, task prompts, and child-session content. Assert both absence of tags and absence of payload text.</p>
+
+    <h3>Steps</h3>
+    <ol>
+      <li><p>Rename <code>TestGenerateExportMarkdown_OmitsNoisyToolPayloads</code> to <code>TestGenerateExportMarkdown_FocusedOmitsExecutionDetails</code>.</p></li>
+      <li><p>Build a mixed assistant message containing visible text, a thinking block, and a non-write tool such as <code>[Bash]</code> with <code>InputJSON</code>, <code>ResultContent</code>, and <code>ResultEvents</code>.</p></li>
+      <li><p>Add an anchored child tree through a <code>Task</code> tool call in a direct <code>generateExportMarkdownTree</code> test, with <code>Depth: "1"</code>, so focused filtering must omit <code>subagent_anchor</code> and the anchored subagent body.</p></li>
+      <li><p>Assert default full export includes representative archival tags: <code>&lt;thinking</code>, <code>&lt;tool_call</code>, <code>&lt;arguments</code>, <code>&lt;tool_body</code>, <code>&lt;tool_result</code>, and <code>&lt;subagent_anchor</code>.</p></li>
+      <li><p>Assert focused export keeps visible assistant text such as <code>Here is the high-level result.</code>.</p></li>
+      <li><p>Assert focused export excludes <code>&lt;thinking</code>, <code>&lt;tool_call</code>, <code>&lt;arguments</code>, <code>&lt;tool_body</code>, <code>&lt;tool_result</code>, <code>&lt;subagent_anchor</code>, shell command payloads, tool output payloads, task prompts, and anchored child message text.</p></li>
+      <li><p>Run the targeted test before production changes:</p>
+        <pre><code>go test ./internal/server -run TestGenerateExportMarkdown_FocusedOmitsExecutionDetails</code></pre>
+        <p>Expected: FAIL because the current implementation still renders non-write tool details and thinking segments in focused output.</p></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Task 2: HTTP Endpoint Spec</h2>
+    <h3>Files</h3>
+    <ul>
+      <li>Modify: <code>internal/server/server_test.go</code></li>
+    </ul>
+
+    <h3>Happy Path</h3>
+    <p>The real <code>/api/v1/sessions/{id}/md?focused=1</code> endpoint returns focused markdown with visible user and assistant context, while omitting execution details across tool categories.</p>
+
+    <h3>Unhappy Path</h3>
+    <p>The endpoint must not accidentally keep old behavior where <code>Write</code> is filtered but <code>Bash</code>, <code>Read</code>, or <code>Task</code> leaks. It must also reject invalid query parameters exactly as before.</p>
+
+    <h3>Safeguards</h3>
+    <p>Use the existing <code>setup</code>, <code>seedSession</code>, and <code>seedMessages</code> helpers so the test exercises SQLite persistence, message reload, route handling, focused filtering, and markdown rendering together.</p>
+
+    <h3>Steps</h3>
+    <ol>
+      <li><p>Rename <code>TestMarkdownSessionExport_FocusedOmitsNoisyWritePayloads</code> to <code>TestMarkdownSessionExport_FocusedOmitsExecutionDetails</code>.</p></li>
+      <li><p>Seed a user message with reviewer-relevant context.</p></li>
+      <li><p>Seed a mixed assistant message with visible summary text plus <code>[Bash]</code>, <code>HasThinking</code> or a thinking segment, <code>HasToolUse</code>, and a persisted <code>db.ToolCall</code> containing input/result payloads.</p></li>
+      <li><p>Request <code>/api/v1/sessions/s1/md?focused=1</code>.</p></li>
+      <li><p>Assert the response includes the user context and visible assistant summary.</p></li>
+      <li><p>Assert the response excludes execution tags and payload strings: <code>&lt;thinking</code>, <code>&lt;tool_call</code>, <code>&lt;arguments</code>, <code>&lt;tool_body</code>, <code>&lt;tool_result</code>, command strings, and output strings.</p></li>
+      <li><p>Run the targeted endpoint test before production changes:</p>
+        <pre><code>go test ./internal/server -run TestMarkdownSessionExport_FocusedOmitsExecutionDetails</code></pre>
+        <p>Expected: FAIL because the current endpoint only omits write-like tool payloads.</p></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Task 3: Implement Focused Execution Filtering</h2>
+    <h3>Files</h3>
+    <ul>
+      <li>Modify: <code>internal/server/export_markdown.go</code></li>
+    </ul>
+
+    <h3>Happy Path</h3>
+    <p>When <code>focused=1</code>, selected messages render without execution-only segments. Full exports without <code>focused=1</code> are unchanged.</p>
+
+    <h3>Unhappy Path</h3>
+    <p>If a mixed assistant message contains only thinking and tool segments after filtering, the renderer may emit an empty message wrapper. That is acceptable for this pass if the message survived focused ordinal filtering, but do not introduce malformed XML-like output.</p>
+
+    <h3>Safeguards</h3>
+    <p>Make the option name describe policy instead of current examples. Remove the per-tool noisy-name classifier so future tools are covered by segment type rather than a maintained allowlist or denylist.</p>
+
+    <h3>Steps</h3>
+    <ol>
+      <li><p>Rename <code>exportMarkdownOptions.OmitNoisyToolPayloads</code> to <code>OmitExecutionDetails</code>.</p></li>
+      <li><p>In <code>handleMarkdownSession</code>, pass <code>OmitExecutionDetails: focused</code>.</p></li>
+      <li><p>In <code>renderMarkdownMessage</code>, skip <code>markdownSegmentThinking</code> when <code>opts.OmitExecutionDetails</code> is true.</p></li>
+      <li><p>In <code>renderMarkdownMessage</code>, skip <code>markdownSegmentTool</code> when <code>opts.OmitExecutionDetails</code> is true.</p></li>
+      <li><p>Remove the <code>isNoisyMarkdownTool</code> helper and the call to it from <code>renderMarkdownToolSegment</code>.</p></li>
+      <li><p>Run gofmt:</p>
+        <pre><code>gofmt -w internal/server/export_markdown.go internal/server/export_test.go internal/server/server_test.go</code></pre>
+      </li>
+      <li><p>Run the targeted tests:</p>
+        <pre><code>go test ./internal/server -run 'TestGenerateExportMarkdown_FocusedOmitsExecutionDetails|TestMarkdownSessionExport_FocusedOmitsExecutionDetails'</code></pre>
+        <p>Expected: PASS.</p></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Task 4: Regression Verification and Commit</h2>
+    <h3>Files</h3>
+    <ul>
+      <li>Inspect: <code>internal/server/export_markdown.go</code></li>
+      <li>Inspect: <code>internal/server/export_test.go</code></li>
+      <li>Inspect: <code>internal/server/server_test.go</code></li>
+      <li>Commit: exact changed files only</li>
+    </ul>
+
+    <h3>Happy Path</h3>
+    <p>The focused markdown behavior is verified by targeted tests, broader server tests are not regressed, and the commit message explains the Agent Relay/RoboRev reviewer-context rationale.</p>
+
+    <h3>Unhappy Path</h3>
+    <p>If broader tests fail outside this focused area, inspect whether the failure is caused by the new filtering. Do not stage unrelated local changes. If an unrelated dirty file exists, leave it out of the commit and report it.</p>
+
+    <h3>Safeguards</h3>
+    <p>Follow repo-local <code>AGENTS.md</code>: commit every completed turn, do not amend, and do not change branches. Stage intentionally changed files only.</p>
+
+    <h3>Steps</h3>
+    <ol>
+      <li><p>Run the targeted tests again after any cleanup:</p>
+        <pre><code>go test ./internal/server -run 'TestGenerateExportMarkdown_FocusedOmitsExecutionDetails|TestMarkdownSessionExport_FocusedOmitsExecutionDetails'</code></pre>
+      </li>
+      <li><p>Run the broader server package tests if practical:</p>
+        <pre><code>go test ./internal/server</code></pre>
+      </li>
+      <li><p>Run whitespace verification:</p>
+        <pre><code>git diff --check -- internal/server/export_markdown.go internal/server/export_test.go internal/server/server_test.go</code></pre>
+      </li>
+      <li><p>Inspect status and diff:</p>
+        <pre><code>git status --short
+git diff -- internal/server/export_markdown.go internal/server/export_test.go internal/server/server_test.go</code></pre>
+      </li>
+      <li><p>Stage only the implementation and test files:</p>
+        <pre><code>git add internal/server/export_markdown.go internal/server/export_test.go internal/server/server_test.go</code></pre>
+      </li>
+      <li><p>Commit with context in the body:</p>
+        <pre><code>git commit -m "Filter execution details from focused markdown export" -m "Agent Relay and RoboRev use focused markdown as Reviewer-Context, where user intent and visible high-level conversation context matter more than tool execution transcripts.
+
+Keep full markdown exports archival, but make focused exports omit thinking and tool segments so tool_call, arguments, tool_body, tool_result, and anchored subagent execution bodies do not crowd reviewer context."</code></pre>
+      </li>
+    </ol>
+  </section>
+</body>
+</html>
