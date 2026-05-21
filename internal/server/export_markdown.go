@@ -17,8 +17,8 @@ import (
 )
 
 type exportMarkdownOptions struct {
-	Depth                 string
-	OmitNoisyToolPayloads bool
+	Depth                string
+	OmitExecutionDetails bool
 }
 
 type exportSessionTree struct {
@@ -89,8 +89,8 @@ func (s *Server) handleMarkdownSession(
 		tree.Messages = tree.Messages[len(tree.Messages)-tail:]
 	}
 	md := generateExportMarkdownTree(tree, exportMarkdownOptions{
-		Depth:                 depth,
-		OmitNoisyToolPayloads: focused,
+		Depth:                depth,
+		OmitExecutionDetails: focused,
 	})
 	filename := sanitizeFilename(
 		tree.Session.Project + "-" + formatDateShort(tree.Session.StartedAt) + ".md",
@@ -344,7 +344,7 @@ func renderUnanchoredMarkdownChildren(
 	opts exportMarkdownOptions,
 	renderedAnchors map[string]bool,
 ) {
-	if opts.Depth == "" || len(tree.AnchoredChildren) == 0 {
+	if opts.Depth == "" || opts.OmitExecutionDetails || len(tree.AnchoredChildren) == 0 {
 		return
 	}
 	children := make([]*exportSessionTree, 0, len(tree.AnchoredChildren))
@@ -401,6 +401,9 @@ func renderMarkdownMessage(
 			b.WriteString(escapeXMLText(seg.Content))
 			b.WriteString("\n")
 		case markdownSegmentThinking:
+			if opts.OmitExecutionDetails {
+				continue
+			}
 			b.WriteString(renderXMLBodyTag("thinking", nil, seg.Content))
 			b.WriteString("\n")
 		case markdownSegmentCode:
@@ -418,6 +421,9 @@ func renderMarkdownMessage(
 			b.WriteString(renderXMLBodyTag("skill", skillAttrs, seg.Content))
 			b.WriteString("\n")
 		case markdownSegmentTool:
+			if opts.OmitExecutionDetails {
+				continue
+			}
 			renderMarkdownToolSegment(b, tree, seg, opts, renderedAnchors)
 		}
 	}
@@ -432,9 +438,6 @@ func renderMarkdownToolSegment(
 	opts exportMarkdownOptions,
 	renderedAnchors map[string]bool,
 ) {
-	if opts.OmitNoisyToolPayloads && isNoisyMarkdownTool(seg) {
-		return
-	}
 	name, category := markdownToolIdentity(seg)
 	attrs := map[string]string{}
 	if name != "" {
@@ -516,19 +519,6 @@ func renderMarkdownToolSegment(
 			b.WriteString("\n")
 		}
 	}
-}
-
-func isNoisyMarkdownTool(seg markdownSegment) bool {
-	name, category := markdownToolIdentity(seg)
-	switch normalizeMarkdownToolName(name) {
-	case "Write", "Edit", "MultiEdit", "NotebookEdit":
-		return true
-	}
-	switch normalizeMarkdownToolName(category) {
-	case "Write", "Edit", "MultiEdit", "NotebookEdit":
-		return true
-	}
-	return false
 }
 
 func markdownToolIdentity(seg markdownSegment) (string, string) {

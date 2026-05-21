@@ -823,42 +823,100 @@ func TestGenerateExportMarkdown_PreservesMultiWordToolNamesAndResultEvents(t *te
 	})
 }
 
-func TestGenerateExportMarkdown_OmitsNoisyToolPayloads(t *testing.T) {
+func TestGenerateExportMarkdown_FocusedOmitsExecutionDetails(t *testing.T) {
 	t.Parallel()
 	session := testSession()
-	msgs := []db.Message{{
-		SessionID:  "test-id",
-		Ordinal:    0,
-		Role:       "assistant",
-		Content:    "Added the test file.\n\n[Write]\ncreated file",
-		HasToolUse: true,
-		ToolCalls: []db.ToolCall{{
-			ToolName:      "Write",
-			Category:      "Write",
-			ToolUseID:     "toolu_write",
-			InputJSON:     `{"file_path":"tests/test_viewer.py","content":"assert True\n"}`,
-			ResultContent: "file written",
+	childStarted := "2025-01-15T10:05:00Z"
+	tree := &exportSessionTree{
+		Session: session,
+		Messages: []db.Message{{
+			SessionID:   "test-id",
+			Ordinal:     0,
+			Role:        "assistant",
+			Content:     "Here is the high-level result.\n\n[Thinking]\nhidden chain\n[/Thinking]\n\n[Bash]\n$ git diff --stat\n\n[Task]\nspawn child",
+			HasThinking: true,
+			HasToolUse:  true,
+			ToolCalls: []db.ToolCall{
+				{
+					ToolName:      "Bash",
+					Category:      "Bash",
+					ToolUseID:     "toolu_bash",
+					InputJSON:     `{"command":"git diff --stat"}`,
+					ResultContent: "files changed",
+					ResultEvents: []db.ToolResultEvent{{
+						ToolUseID: "toolu_bash",
+						Source:    "subagent_notification",
+						Status:    "running",
+						Content:   "still running",
+					}},
+				},
+				{
+					ToolName:          "Task",
+					Category:          "Task",
+					ToolUseID:         "toolu_task",
+					InputJSON:         `{"prompt":"inspect child details"}`,
+					SubagentSessionID: "child-a",
+				},
+			},
 		}},
-	}}
+		AnchoredChildren: map[string]*exportSessionTree{
+			"child-a": {
+				Session: &db.Session{
+					ID:               "child-a",
+					Project:          "proj",
+					Agent:            "claude",
+					ParentSessionID:  new("test-id"),
+					RelationshipType: "subagent",
+					StartedAt:        &childStarted,
+				},
+				Messages: []db.Message{{
+					SessionID: "child-a",
+					Ordinal:   0,
+					Role:      "assistant",
+					Content:   "anchored child execution detail",
+				}},
+				AnchoredChildren: map[string]*exportSessionTree{},
+			},
+		},
+	}
 
-	full := generateExportMarkdown(session, msgs, exportMarkdownOptions{})
+	full := generateExportMarkdownTree(tree, exportMarkdownOptions{
+		Depth: "1",
+	})
 	assertContainsAll(t, full, []string{
-		`<tool_call id="toolu_write" name="Write" category="Write">`,
-		`<arguments><![CDATA[` + "\n{\"file_path\":\"tests/test_viewer.py\",\"content\":\"assert True\\n\"}\n" + `]]></arguments>`,
-		`<tool_result><![CDATA[` + "\nfile written\n" + `]]></tool_result>`,
+		"Here is the high-level result.",
+		`<thinking><![CDATA[` + "\nhidden chain\n" + `]]></thinking>`,
+		`<tool_call id="toolu_bash" name="Bash" category="Bash">`,
+		`<arguments><![CDATA[` + "\n{\"command\":\"git diff --stat\"}\n" + `]]></arguments>`,
+		`<tool_body><![CDATA[` + "\n$ git diff --stat\n" + `]]></tool_body>`,
+		`<tool_result><![CDATA[` + "\nfiles changed\n" + `]]></tool_result>`,
+		`<tool_result tool_call_id="toolu_bash" source="subagent_notification" status="running"><![CDATA[` + "\nstill running\n" + `]]></tool_result>`,
+		`<subagent_anchor session_id="child-a" tool_call_id="toolu_task" depth="1">`,
+		"anchored child execution detail",
 	})
 
-	focused := generateExportMarkdown(session, msgs, exportMarkdownOptions{
-		OmitNoisyToolPayloads: true,
+	focused := generateExportMarkdownTree(tree, exportMarkdownOptions{
+		Depth:                "1",
+		OmitExecutionDetails: true,
 	})
 	assertContainsAll(t, focused, []string{
-		"Added the test file.",
+		"Here is the high-level result.",
 	})
 	assertContainsNone(t, focused, []string{
+		`<thinking`,
 		`<tool_call`,
-		`<arguments>`,
-		`assert True`,
-		`file written`,
+		`<arguments`,
+		`<tool_body`,
+		`<tool_result`,
+		`<subagent_anchor`,
+		`<subagent_session`,
+		`<child_session`,
+		"hidden chain",
+		"git diff --stat",
+		"files changed",
+		"still running",
+		"inspect child details",
+		"anchored child execution detail",
 	})
 }
 

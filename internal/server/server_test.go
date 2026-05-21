@@ -2212,24 +2212,25 @@ func TestMarkdownSessionExport_FocusedTailCountsFilteredMessages(t *testing.T) {
 	}
 }
 
-func TestMarkdownSessionExport_FocusedOmitsNoisyWritePayloads(t *testing.T) {
+func TestMarkdownSessionExport_FocusedOmitsExecutionDetails(t *testing.T) {
 	te := setup(t)
 	te.seedSession(t, "s1", "my-app", 2)
 	te.seedMessages(t, "s1", 2, func(i int, m *db.Message) {
 		switch i {
 		case 0:
 			m.Role = "user"
-			m.Content = "Add the focused export test"
+			m.Content = "Reviewer context should keep this user request"
 		case 1:
 			m.Role = "assistant"
-			m.Content = "Added the focused export test.\n\n[Write]\ncreated file"
+			m.Content = "Here is the reviewer-facing summary.\n\n[Thinking]\nhidden route thought\n[/Thinking]\n\n[Bash]\n$ go test ./internal/server"
+			m.HasThinking = true
 			m.HasToolUse = true
 			m.ToolCalls = []db.ToolCall{{
-				ToolName:      "Write",
-				Category:      "Write",
-				ToolUseID:     "toolu_write",
-				InputJSON:     `{"file_path":"tests/test_viewer.py","content":"assert True\n"}`,
-				ResultContent: "file written",
+				ToolName:      "Bash",
+				Category:      "Bash",
+				ToolUseID:     "toolu_bash",
+				InputJSON:     `{"command":"go test ./internal/server"}`,
+				ResultContent: "route tests passed",
 			}}
 		}
 	})
@@ -2238,11 +2239,16 @@ func TestMarkdownSessionExport_FocusedOmitsNoisyWritePayloads(t *testing.T) {
 	assertStatus(t, w, http.StatusOK)
 
 	body := w.Body.String()
-	assert.Contains(t, body, "Added the focused export test.")
+	assert.Contains(t, body, "Reviewer context should keep this user request")
+	assert.Contains(t, body, "Here is the reviewer-facing summary.")
+	assert.NotContains(t, body, `<thinking`)
 	assert.NotContains(t, body, `<tool_call`)
-	assert.NotContains(t, body, `<arguments>`)
-	assert.NotContains(t, body, `assert True`)
-	assert.NotContains(t, body, `file written`)
+	assert.NotContains(t, body, `<arguments`)
+	assert.NotContains(t, body, `<tool_body`)
+	assert.NotContains(t, body, `<tool_result`)
+	assert.NotContains(t, body, `hidden route thought`)
+	assert.NotContains(t, body, `go test ./internal/server`)
+	assert.NotContains(t, body, `route tests passed`)
 }
 
 func TestMarkdownSessionExport_TailLargerThanMessagesIsNoop(t *testing.T) {
@@ -2296,7 +2302,7 @@ func TestMarkdownSessionExport_DepthOneIncludesChildSessions(t *testing.T) {
 	assertBodyContains(t, w, `<subagent_session id="child-a" parent_session_id="parent" relationship="subagent"`)
 }
 
-func TestMarkdownSessionExport_FocusedDepthFiltersAndPreservesChildSessions(t *testing.T) {
+func TestMarkdownSessionExport_FocusedDepthOmitsAnchoredSubagentSessions(t *testing.T) {
 	te := setup(t)
 	te.seedSession(t, "parent", "my-app", 1)
 	te.seedMessages(t, "parent", 1, func(i int, m *db.Message) {
@@ -2342,9 +2348,7 @@ func TestMarkdownSessionExport_FocusedDepthFiltersAndPreservesChildSessions(t *t
 
 	body := w.Body.String()
 	for _, want := range []string{
-		`<child_session id="child-a" parent_session_id="parent" relationship="subagent"`,
-		"Child prompt",
-		"Child final",
+		`<session id="parent" project="my-app" agent="Claude"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected focused depth export to include %q, got:\n%s", want, body)
@@ -2352,9 +2356,13 @@ func TestMarkdownSessionExport_FocusedDepthFiltersAndPreservesChildSessions(t *t
 	}
 	for _, dropped := range []string{
 		`<subagent_anchor session_id="child-a"`,
+		`<subagent_session id="child-a"`,
+		`<child_session id="child-a"`,
 		"child work",
+		"Child prompt",
 		"Child draft",
 		"child-file",
+		"Child final",
 		"child hidden thought",
 	} {
 		if strings.Contains(body, dropped) {
