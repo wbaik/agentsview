@@ -1479,25 +1479,51 @@ func ParseCodexSessionFrom(
 	b.currentModel = readCodexModelAtOffset(path, offset)
 	var fallbackErr error
 
-	consumed, err := readJSONLFrom(
-		path, offset, func(line string) {
-			if fallbackErr != nil {
-				return
-			}
-			// Skip session_meta — already processed in
-			// the initial full parse.
-			if gjson.Get(line, "type").Str ==
-				codexTypeSessionMeta {
-				return
-			}
-			if codexIncrementalNeedsFullParse(line) {
-				fallbackErr = errCodexIncrementalNeedsFullParse
-				return
-			}
-			b.processLine(line)
-		},
-	)
+	f, err := os.Open(path)
 	if err != nil {
+		return nil, time.Time{}, 0, fmt.Errorf(
+			"open %s: %w", path, err,
+		)
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return nil, time.Time{}, 0, fmt.Errorf(
+			"seek %s to %d: %w", path, offset, err,
+		)
+	}
+
+	lr := newLineReader(f, maxLineSize)
+	var consumed int64
+	var safeEndedAt time.Time
+	for {
+		line, ok := lr.next()
+		if !ok {
+			break
+		}
+		if fallbackErr != nil || !gjson.Valid(line) {
+			continue
+		}
+		// Skip session_meta — already processed in the
+		// initial full parse.
+		if gjson.Get(line, "type").Str == codexTypeSessionMeta {
+			if len(b.pendingReasoning) == 0 {
+				consumed = lr.bytesRead
+				safeEndedAt = b.endedAt
+			}
+			continue
+		}
+		if codexIncrementalNeedsFullParse(line) {
+			fallbackErr = errCodexIncrementalNeedsFullParse
+			continue
+		}
+		b.processLine(line)
+		if len(b.pendingReasoning) == 0 {
+			consumed = lr.bytesRead
+			safeEndedAt = b.endedAt
+		}
+	}
+	if err := lr.Err(); err != nil {
 		return nil, time.Time{}, 0, fmt.Errorf(
 			"reading codex %s from offset %d: %w",
 			path, offset, err,
@@ -1507,10 +1533,9 @@ func ParseCodexSessionFrom(
 		return nil, time.Time{}, 0, fallbackErr
 	}
 
-	b.flushPendingReasoning()
 	b.flushPendingAgentResults()
 
-	return b.messages, b.endedAt, consumed, nil
+	return b.messages, safeEndedAt, consumed, nil
 }
 
 // IsIncrementalFullParseFallback reports whether an incremental

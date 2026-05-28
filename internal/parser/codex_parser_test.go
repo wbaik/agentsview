@@ -1411,6 +1411,51 @@ func TestParseCodexSessionFrom_Incremental(t *testing.T) {
 	assert.False(t, endedAt.IsZero())
 }
 
+func TestParseCodexSessionFrom_DefersTrailingReasoningSummary(t *testing.T) {
+	t.Parallel()
+
+	initial := testjsonl.JoinJSONL(
+		testjsonl.CodexSessionMetaJSON(
+			"inc-reasoning", "/projects/api",
+			"codex_cli_rs", tsEarly,
+		),
+		testjsonl.CodexMsgJSON("user", "hello", tsEarlyS1),
+	)
+	path := createTestFile(t, "incremental_reasoning.jsonl", initial)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	offset := info.Size()
+
+	reasoning := `{"timestamp":"2024-01-01T10:00:02Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Inspecting before tool use"}],"content":null,"encrypted_content":"ciphertext"}}` + "\n"
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	_, err = f.WriteString(reasoning)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	newMsgs, _, consumed, err := ParseCodexSessionFrom(path, offset, 1, false)
+	require.NoError(t, err)
+	assert.Empty(t, newMsgs)
+	assert.Equal(t, int64(0), consumed)
+
+	f, err = os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	_, err = f.WriteString(testjsonl.CodexFunctionCallArgsJSON("exec_command", map[string]any{
+		"cmd": "rg --files",
+	}, tsEarlyS5))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	newMsgs, _, consumed, err = ParseCodexSessionFrom(path, offset, 1, false)
+	require.NoError(t, err)
+	require.Len(t, newMsgs, 1)
+	assert.Positive(t, consumed)
+	assert.True(t, newMsgs[0].HasThinking)
+	assert.Equal(t, "Inspecting before tool use", newMsgs[0].ThinkingText)
+	assert.Contains(t, newMsgs[0].Content, "[/Thinking]\n\n[Bash]\n$ rg --files")
+}
+
 func TestParseCodexSessionFrom_SkipsSessionMeta(t *testing.T) {
 	t.Parallel()
 
