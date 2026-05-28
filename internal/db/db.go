@@ -57,6 +57,9 @@ import (
 // Existing rows need re-parsing so inline subagent expansion can
 // resolve child sessions from persisted tool call metadata.)
 //
+// (29: Codex parser now persists plaintext reasoning
+// summary_text as message thinking data.)
+//
 // (23: split termination_status into awaiting_user vs
 // clean (Claude end_turn / Codex task_complete vs other clean
 // stops); Codex parser now classifies based on task lifecycle
@@ -88,7 +91,7 @@ import (
 //
 // (17: Codex <skill> template filtering.)
 // (16: <turn_aborted> system messages.)
-const dataVersion = 28
+const dataVersion = 29
 
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 

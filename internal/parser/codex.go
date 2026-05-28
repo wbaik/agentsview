@@ -45,6 +45,7 @@ type codexSessionBuilder struct {
 	agentSpawnCalls      map[string]string
 	agentWaitCalls       map[string]string
 	pendingAgentMessage  *codexPendingAgentMessage
+	pendingReasoning     []codexPendingReasoning
 	pendingAgentEvents   map[string][]codexPendingEvent
 	orphanNotificationIx map[string]int
 	lastTokenUsageRaw    string // dedup streaming duplicates
@@ -75,6 +76,11 @@ type codexPendingAgentMessage struct {
 	message        string
 	phase          string
 	memoryCitation *ParsedMemoryCitation
+}
+
+type codexPendingReasoning struct {
+	text      string
+	timestamp time.Time
 }
 
 func newCodexSessionBuilder(
@@ -150,6 +156,9 @@ func (b *codexSessionBuilder) handleResponseItem(
 	case "function_call_output":
 		b.handleFunctionCallOutput(payload, ts)
 		return
+	case "reasoning":
+		b.handleReasoning(payload, ts)
+		return
 	}
 
 	role := payload.Get("role").Str
@@ -163,6 +172,7 @@ func (b *codexSessionBuilder) handleResponseItem(
 	}
 
 	if role == "user" {
+		b.flushPendingReasoning()
 		b.pendingAgentMessage = nil
 	}
 
@@ -195,12 +205,15 @@ func (b *codexSessionBuilder) handleResponseItem(
 			b.pendingAgentMessage = nil
 		}
 	}
+	thinkingText, hasThinking := b.consumePendingReasoning(&content)
 
 	b.messages = append(b.messages, ParsedMessage{
 		Ordinal:        b.ordinal,
 		Role:           RoleType(role),
 		Content:        content,
+		ThinkingText:   thinkingText,
 		Timestamp:      ts,
+		HasThinking:    hasThinking,
 		ContentLength:  len(content),
 		Phase:          phase,
 		MemoryCitation: memoryCitation,
@@ -220,6 +233,17 @@ func (b *codexSessionBuilder) handleEventMsg(payload gjson.Result) {
 	case "agent_message":
 		b.handleAgentMessageEvent(payload)
 	}
+}
+
+func (b *codexSessionBuilder) handleReasoning(payload gjson.Result, ts time.Time) {
+	text := extractCodexReasoningSummary(payload)
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	b.pendingReasoning = append(b.pendingReasoning, codexPendingReasoning{
+		text:      text,
+		timestamp: ts,
+	})
 }
 
 func (b *codexSessionBuilder) handleAgentMessageEvent(payload gjson.Result) {
@@ -323,6 +347,7 @@ func (b *codexSessionBuilder) handleFunctionCall(
 	}
 
 	content := formatCodexFunctionCall(name, payload)
+	thinkingText, hasThinking := b.consumePendingReasoning(&content)
 	inputJSON := extractCodexInputJSON(payload)
 	waitAgentIDs := []string(nil)
 	if isCodexWaitAgentCall(name) && callID != "" {
@@ -334,7 +359,9 @@ func (b *codexSessionBuilder) handleFunctionCall(
 		Ordinal:       b.ordinal,
 		Role:          RoleAssistant,
 		Content:       content,
+		ThinkingText:  thinkingText,
 		Timestamp:     ts,
+		HasThinking:   hasThinking,
 		HasToolUse:    true,
 		ContentLength: len(content),
 		Model:         b.currentModel,
@@ -405,6 +432,53 @@ func (b *codexSessionBuilder) handleFunctionCallOutput(
 			return true
 		})
 	}
+}
+
+func (b *codexSessionBuilder) consumePendingReasoning(content *string) (string, bool) {
+	if len(b.pendingReasoning) == 0 {
+		return "", false
+	}
+	parts := make([]string, 0, len(b.pendingReasoning))
+	for _, pending := range b.pendingReasoning {
+		if text := strings.TrimSpace(pending.text); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	b.pendingReasoning = nil
+	if len(parts) == 0 {
+		return "", false
+	}
+	thinkingText := strings.Join(parts, "\n\n")
+	block := "[Thinking]\n" + thinkingText + "\n[/Thinking]"
+	if strings.TrimSpace(*content) == "" {
+		*content = block
+	} else {
+		*content = block + "\n\n" + *content
+	}
+	return thinkingText, true
+}
+
+func (b *codexSessionBuilder) flushPendingReasoning() {
+	if len(b.pendingReasoning) == 0 {
+		return
+	}
+	ts := b.pendingReasoning[0].timestamp
+	content := ""
+	thinkingText, hasThinking := b.consumePendingReasoning(&content)
+	if !hasThinking {
+		return
+	}
+	b.messages = append(b.messages, ParsedMessage{
+		Ordinal:       b.ordinal,
+		Role:          RoleAssistant,
+		Content:       content,
+		ThinkingText:  thinkingText,
+		Timestamp:     ts,
+		HasThinking:   true,
+		ContentLength: len(content),
+		Model:         b.currentModel,
+	})
+	b.ordinal++
 }
 
 // setCallSubagentSessionID links a tool call to the session of
@@ -1135,6 +1209,29 @@ func extractCodexContent(payload gjson.Result) string {
 	return strings.Join(texts, "\n")
 }
 
+func extractCodexReasoningSummary(payload gjson.Result) string {
+	var texts []string
+	payload.Get("summary").ForEach(
+		func(_, block gjson.Result) bool {
+			switch block.Type {
+			case gjson.String:
+				if t := strings.TrimSpace(block.Str); t != "" {
+					texts = append(texts, t)
+				}
+			default:
+				if block.Get("type").Str != "summary_text" {
+					return true
+				}
+				if t := strings.TrimSpace(block.Get("text").Str); t != "" {
+					texts = append(texts, t)
+				}
+			}
+			return true
+		},
+	)
+	return strings.Join(texts, "\n\n")
+}
+
 func parseCodexMemoryCitation(
 	citation gjson.Result,
 ) *ParsedMemoryCitation {
@@ -1263,6 +1360,7 @@ func ParseCodexSession(
 			fmt.Errorf("reading codex %s: %w", path, err)
 	}
 
+	b.flushPendingReasoning()
 	b.flushPendingAgentResults()
 	b.normalizeOrdinals()
 
@@ -1409,6 +1507,7 @@ func ParseCodexSessionFrom(
 		return nil, time.Time{}, 0, fallbackErr
 	}
 
+	b.flushPendingReasoning()
 	b.flushPendingAgentResults()
 
 	return b.messages, b.endedAt, consumed, nil

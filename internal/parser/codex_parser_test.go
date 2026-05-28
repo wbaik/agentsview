@@ -110,6 +110,28 @@ func TestParseCodexSession_AttachesMemoryCitationFromAgentMessage(t *testing.T) 
 	assert.Equal(t, []string{"019dd3e2-9e4d-7063-a240-779bc4efa78c"}, got.MemoryCitation.RolloutIDs)
 }
 
+func TestParseCodexSession_AttachesReasoningSummaryToNextAssistantItem(t *testing.T) {
+	content := testjsonl.JoinJSONL(
+		testjsonl.CodexSessionMetaJSON("reasoning-123", "/tmp", "codex_cli_rs", tsEarly),
+		testjsonl.CodexMsgJSON("user", "inspect files", tsEarlyS1),
+		`{"timestamp":"2024-01-01T10:00:02Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"**Inspecting files**\n\nI need to read the parser first."}],"content":null,"encrypted_content":"ciphertext"}}`,
+		testjsonl.CodexFunctionCallArgsJSON("exec_command", map[string]any{
+			"cmd": "rg --files",
+		}, tsEarlyS5),
+	)
+	_, msgs := runCodexParserTest(t, "reasoning.jsonl", content, false)
+
+	require.Len(t, msgs, 2)
+	got := msgs[1]
+	assert.Equal(t, RoleAssistant, got.Role)
+	assert.True(t, got.HasThinking)
+	assert.Equal(t, "**Inspecting files**\n\nI need to read the parser first.", got.ThinkingText)
+	assert.Contains(t, got.Content, "[Thinking]\n**Inspecting files**")
+	assert.Contains(t, got.Content, "[/Thinking]\n\n[Bash]\n$ rg --files")
+	assert.True(t, got.HasToolUse)
+	assertToolCalls(t, got.ToolCalls, []ParsedToolCall{{ToolName: "exec_command", Category: "Bash"}})
+}
+
 func TestParseCodexSession_StripsMemoryCitationTagWithoutEvent(t *testing.T) {
 	content := testjsonl.JoinJSONL(
 		testjsonl.CodexSessionMetaJSON("strip-123", "/tmp", "codex_cli_rs", tsEarly),
